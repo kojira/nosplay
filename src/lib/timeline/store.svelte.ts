@@ -35,6 +35,8 @@ const MAX_NOTES = 5000;
 const DEFAULT_WINDOW_MS = 300_000; // 5 minutes
 const HISTORY_LIMIT = 500;
 const LIVE_GLOBAL_LIMIT = 200;
+/** Max live notes buffered for TTS; older ones are dropped during a flood. */
+const TTS_QUEUE_MAX = 50;
 
 export class TimelineStore {
   // ---- reactive state ----
@@ -127,7 +129,16 @@ export class TimelineStore {
   #subs: SubCloser[] = [];
   #raf: number | null = null;
   #lastFrame = 0;
-  #lastSpokenId: string | null = null;
+  /** FIFO queue of live arrivals awaiting speech, drained one at a time. */
+  #ttsQueue: { id: string; text: string }[] = [];
+  /** True while an utterance is in flight (between speak() and its end/error). */
+  #ttsBusy = false;
+  /**
+   * Becomes true only once the live subscription is active, so history /
+   * bootstrap notes loaded on connect/reconnect are never spoken — TTS focuses
+   * on notes that arrive live afterwards.
+   */
+  #ttsLive = false;
   /** Disposes the `voiceschanged` subscription. */
   #voicesStop: (() => void) | null = null;
   /** Authors of the current feed (follow list, or fallback authors in limited mode). */
@@ -286,6 +297,10 @@ export class TimelineStore {
   /** Tear down current subscriptions, clear notes, and (re)build the feed. */
   async #rebuildFeed(): Promise<void> {
     this.#closeSubs();
+    // Suppress TTS until the new live subscription starts, and drop anything
+    // queued/speaking from the old feed.
+    this.#ttsLive = false;
+    this.#stopSpeech();
     this.#clearNotes();
     this.status = 'connecting';
     this.error = null;
@@ -324,7 +339,6 @@ export class TimelineStore {
     this.notes = [];
     this.#ids.clear();
     this.earliestMs = Date.now();
-    this.#lastSpokenId = null;
   }
 
   // ============================================================
@@ -464,6 +478,10 @@ export class TimelineStore {
       );
       this.#subs.push(globalSub);
     }
+
+    // From here on, events delivered by these subscriptions are live arrivals
+    // eligible for TTS (subject to ttsEnabled / isLive checks in #enqueueTts).
+    this.#ttsLive = true;
   }
 
   async #loadNames(authors: string[], relays: string[]): Promise<void> {
@@ -527,7 +545,7 @@ export class TimelineStore {
     // in the follow list, so without this most notes would show no name/icon.
     this.#queueProfile(note.pubkey);
 
-    this.#maybeSpeakHead();
+    this.#enqueueTts(note);
   }
 
   /** Queue an author pubkey for a debounced batched kind:0 profile fetch. */
@@ -568,34 +586,67 @@ export class TimelineStore {
     this.#voicesStop = onVoicesChanged(refresh);
   }
 
-  #maybeSpeakHead(): void {
+  /**
+   * Enqueue a live note for sequential TTS. No-op unless TTS is enabled, the
+   * live subscription has started (so history/bootstrap notes are never read),
+   * and we are following the live edge — a paused/seeked session stays silent
+   * so incoming notes don't talk over what the user is reading in the past.
+   *
+   * Every eligible note is queued (not just the latest head), so a burst of
+   * arrivals is spoken one after another instead of only the most recent one.
+   */
+  #enqueueTts(note: Note): void {
     if (!this.ttsEnabled || !hasTts()) return;
-    const head = this.headNote;
-    if (!head) return;
-    if (head.id === this.#lastSpokenId) return;
-    // Only speak notes at/behind the live-ish playhead (avoid speaking far-past on seek).
-    const id = head.id;
-    this.#lastSpokenId = id;
-    speak(head.content, {
+    if (!this.#ttsLive || !this.isLive) return;
+    this.#ttsQueue.push({ id: note.id, text: note.content });
+    // Bound the backlog: during a flood, reading every note would lag far
+    // behind the timeline, so keep only the most recent arrivals.
+    if (this.#ttsQueue.length > TTS_QUEUE_MAX) {
+      this.#ttsQueue.splice(0, this.#ttsQueue.length - TTS_QUEUE_MAX);
+    }
+    this.#drainTts();
+  }
+
+  /** Speak the next queued note, one utterance at a time. */
+  #drainTts(): void {
+    if (this.#ttsBusy) return;
+    const next = this.#ttsQueue.shift();
+    if (!next) return;
+    this.#ttsBusy = true;
+    const started = speak(next.text, {
       onStart: () => {
-        this.speakingId = id;
+        this.speakingId = next.id;
       },
-      // Guard the clear so a stale callback for an old note doesn't wipe a newer one.
-      onEnd: () => {
-        if (this.speakingId === id) this.speakingId = null;
-      },
-      onError: () => {
-        if (this.speakingId === id) this.speakingId = null;
-      },
+      onEnd: () => this.#finishTts(next.id),
+      onError: () => this.#finishTts(next.id),
     });
+    // Nothing was actually queued (empty after sanitize, or TTS unavailable):
+    // no end callback will fire, so advance immediately. This is the fix for a
+    // note being treated as "spoken" before speak() actually succeeded — an
+    // unspeakable note no longer blocks the notes queued behind it.
+    if (!started) {
+      this.#ttsBusy = false;
+      this.#drainTts();
+    }
+  }
+
+  /** Mark the current utterance done and move on to the next queued note. */
+  #finishTts(id: string): void {
+    // Guard the clear so a stale callback for an old note doesn't wipe a newer one.
+    if (this.speakingId === id) this.speakingId = null;
+    this.#ttsBusy = false;
+    this.#drainTts();
   }
 
   /**
-   * Cancel speech and clear the speaking indicator. `speechSynthesis.cancel()`
-   * does not reliably fire `onend`, so we clear `speakingId` ourselves.
+   * Cancel speech and clear both the queue and the speaking indicator.
+   * `speechSynthesis.cancel()` does not reliably fire `onend`, so we reset our
+   * own state explicitly.
    */
   #stopSpeech(): void {
     cancelSpeech();
+    this.#ttsQueue = [];
+    this.#ttsBusy = false;
     this.speakingId = null;
   }
 
@@ -689,8 +740,9 @@ export class TimelineStore {
 
   toggleTts(): void {
     this.ttsEnabled = !this.ttsEnabled;
+    // Disabling cancels/clears anything queued or in flight. Enabling starts
+    // fresh: only notes that arrive from now on are spoken (no backlog replay).
     if (!this.ttsEnabled) this.#stopSpeech();
-    else this.#lastSpokenId = this.headNote?.id ?? null;
   }
 
   /** Choose a TTS voice by voiceURI, or null to use the Japanese auto-pick. */

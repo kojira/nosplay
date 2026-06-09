@@ -132,19 +132,25 @@ function findSelectedVoice(): SpeechSynthesisVoice | null {
 }
 
 /**
- * Speak the given text if TTS is available. No-op otherwise.
+ * Speak the given text if TTS is available.
  *
- * Optional lifecycle callbacks let callers track speaking state. Note that
- * `speechSynthesis.cancel()` does not reliably fire `onend` across browsers,
- * so callers must also clear their state on explicit cancel.
+ * Returns `true` when an utterance was actually handed to the speech engine —
+ * in that case exactly one of the `onEnd` / `onError` callbacks is expected to
+ * fire later. Returns `false` when nothing was queued (TTS unavailable, or the
+ * text is empty after sanitizing); callers must NOT wait for `onEnd` in that
+ * case, since it will never arrive. This lets a queue advance correctly instead
+ * of stalling on a note that produced no speakable text.
+ *
+ * Note that `speechSynthesis.cancel()` does not reliably fire `onend` across
+ * browsers, so callers must also clear their state on explicit cancel.
  */
 export function speak(
   text: string,
   callbacks?: { onStart?: () => void; onEnd?: () => void; onError?: () => void },
-): void {
-  if (!hasTts()) return;
+): boolean {
+  if (!hasTts()) return false;
   const cleaned = sanitizeForSpeech(text);
-  if (!cleaned) return;
+  if (!cleaned) return false;
   try {
     primeVoices();
     if (!cachedJaVoice) refreshVoices(); // voices may have loaded since priming
@@ -163,8 +169,10 @@ export function speak(
     utter.onend = () => callbacks?.onEnd?.();
     utter.onerror = () => callbacks?.onError?.();
     window.speechSynthesis.speak(utter);
+    return true;
   } catch {
     // ignore speech failures
+    return false;
   }
 }
 

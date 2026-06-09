@@ -30,7 +30,12 @@ no sample or fake posts.
   Nostr identifiers (npub/note/etc.) are stripped or replaced before speaking so
   they aren't read aloud. The note currently being read aloud is highlighted in
   the timeline (a pulsing outline plus a 🔊 badge) so you can see which post is
-  speaking.
+  speaking. Live arrivals are spoken through an app-level FIFO queue, one note
+  at a time, so a burst of incoming notes is read sequentially instead of only
+  the latest one — and a note that sanitizes to nothing never blocks the notes
+  behind it. Only notes that arrive **after** the live subscription starts are
+  spoken: reconnecting or reloading never replays the loaded history, and a
+  paused/seeked session stays silent until you return to LIVE.
 - **Explicit NIP-07 login** — an account bar shows the login state (logged
   out / logging in / logged in / login error), the obtained pubkey (as a short
   npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login
