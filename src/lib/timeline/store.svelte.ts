@@ -56,6 +56,18 @@ export class TimelineStore {
   selectedVoiceURI = $state<string | null>(null);
   /** Id of the note currently being read aloud by TTS, or null. */
   speakingId = $state<string | null>(null);
+  /**
+   * Hex pubkeys the user has permanently muted for TTS. Notes from these
+   * authors still render in the timeline but are never spoken. Persisted across
+   * sessions. Reassigned as a fresh Set on every change so $state tracks it.
+   */
+  mutedPubkeys = $state<Set<string>>(new Set());
+  /**
+   * Bumped whenever the note feed is torn down and rebuilt. Lets the Timeline
+   * view drop its cached, identity-keyed lane assignments so a new feed starts
+   * with a clean lane layout instead of inheriting stale rows.
+   */
+  feedVersion = $state<number>(0);
   earliestMs = $state<number>(Date.now());
   names = $state<Map<string, ProfileMeta>>(new Map());
   error = $state<string | null>(null);
@@ -346,6 +358,9 @@ export class TimelineStore {
     this.notes = [];
     this.#ids.clear();
     this.earliestMs = Date.now();
+    // Invalidate the view's cached lane assignments: the rebuilt feed is a fresh
+    // set of notes, so their rows should be assigned anew.
+    this.feedVersion++;
   }
 
   // ============================================================
@@ -383,6 +398,11 @@ export class TimelineStore {
       if (typeof saved.rememberLogin === 'boolean') {
         this.#rememberLogin = saved.rememberLogin;
       }
+      if (Array.isArray(saved.mutedPubkeys)) {
+        this.mutedPubkeys = new Set(
+          saved.mutedPubkeys.filter((pk): pk is string => typeof pk === 'string'),
+        );
+      }
       // Playhead only restores when the last session was paused (not LIVE);
       // a live session reloads live, following wall-clock now. The actual
       // playhead is applied after history loads (see #applyPendingPlayhead),
@@ -408,6 +428,7 @@ export class TimelineStore {
         void this.isLive;
         void this.relayMode;
         void this.manualRelays;
+        void this.mutedPubkeys;
         this.#scheduleSave();
       });
       return () => {};
@@ -438,6 +459,7 @@ export class TimelineStore {
       relayMode: this.relayMode,
       manualRelays: this.manualRelays,
       rememberLogin: this.#rememberLogin,
+      mutedPubkeys: [...this.mutedPubkeys],
     };
   }
 
@@ -605,6 +627,7 @@ export class TimelineStore {
   #enqueueTts(note: Note): void {
     if (!this.ttsEnabled || !hasTts()) return;
     if (!this.#ttsLive || !this.isLive) return;
+    if (this.mutedPubkeys.has(note.pubkey)) return; // permanently muted author
     this.#ttsQueue.push({ id: note.id, text: note.content });
     // Bound the backlog: during a flood, reading every note would lag far
     // behind the timeline, so keep only the most recent arrivals.
@@ -632,7 +655,10 @@ export class TimelineStore {
     const head = this.headNote;
     if (!head) return;
     if (head.id === this.#lastPlayheadSpokenId) return;
+    // Record the head as handled even when muted, so unmuting later doesn't make
+    // an already-passed note suddenly speak.
     this.#lastPlayheadSpokenId = head.id;
+    if (this.mutedPubkeys.has(head.pubkey)) return; // permanently muted author
     this.#ttsQueue.push({ id: head.id, text: head.content });
     // Bound the backlog the same way live arrivals are bounded, so a fast
     // playback speed crossing many notes can't build an unbounded queue.
@@ -786,6 +812,35 @@ export class TimelineStore {
     // Disabling cancels/clears anything queued or in flight. Enabling starts
     // fresh: only notes that arrive from now on are spoken (no backlog replay).
     if (!this.ttsEnabled) this.#stopSpeech();
+  }
+
+  /** Whether the given author (hex pubkey) is permanently muted for TTS. */
+  isMuted(pubkey: string): boolean {
+    return this.mutedPubkeys.has(pubkey);
+  }
+
+  /** Permanently mute an author's notes for TTS (persisted). No-op if already muted. */
+  muteAuthor(pubkey: string): void {
+    if (this.mutedPubkeys.has(pubkey)) return;
+    const next = new Set(this.mutedPubkeys);
+    next.add(pubkey);
+    this.mutedPubkeys = next;
+    this.#scheduleSave();
+  }
+
+  /** Un-mute a previously muted author (persisted). No-op if not muted. */
+  unmuteAuthor(pubkey: string): void {
+    if (!this.mutedPubkeys.has(pubkey)) return;
+    const next = new Set(this.mutedPubkeys);
+    next.delete(pubkey);
+    this.mutedPubkeys = next;
+    this.#scheduleSave();
+  }
+
+  /** Toggle an author's permanent TTS mute (persisted). */
+  toggleMute(pubkey: string): void {
+    if (this.mutedPubkeys.has(pubkey)) this.unmuteAuthor(pubkey);
+    else this.muteAuthor(pubkey);
   }
 
   /** Choose a TTS voice by voiceURI, or null to use the Japanese auto-pick. */

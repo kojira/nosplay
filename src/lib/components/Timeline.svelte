@@ -26,16 +26,56 @@
     lane: number;
     isHead: boolean;
     isSpeaking: boolean;
+    isMuted: boolean;
   }
 
-  // Assign lanes greedily over the time-ordered visible notes so labels do not
-  // overlap. visibleNotes is ascending by created_at and never includes notes
-  // newer than the playhead, so f is always >= 0 (nothing renders to the right
-  // of the playhead line).
+  // Identity-keyed lane cache. A note keeps the lane it was first assigned for
+  // its whole lifetime, so as the visible window slides the note's vertical
+  // row never changes — it scrolls horizontally without bouncing up/down. This
+  // replaces the previous purely greedy, window-local reassignment (which
+  // recomputed every lane each frame and so jittered as earlier notes left the
+  // window). Cleared when the feed is rebuilt (see feedVersion below).
+  const laneByNote = new Map<string, number>();
+  // Per-author preferred lane: when a brand-new note needs a row, we try to put
+  // it on the same lane its author last used (if free), keeping an author's
+  // notes on a consistent line. Also reset on feed rebuild.
+  const laneByAuthor = new Map<string, number>();
+  let laneFeedVersion = -1;
+
+  /**
+   * Pick a lane for a note not yet in the cache. Deterministic given the lanes'
+   * current free times: prefer the author's previous lane when it's free, else
+   * the lane that frees soonest (least overlap). Never reassigns an existing
+   * note, so it cannot cause vertical bounce.
+   */
+  function chooseLane(laneFreeAt: number[], ms: number, preferred: number | undefined): number {
+    if (preferred !== undefined && laneFreeAt[preferred] <= ms) return preferred;
+    let lane = 0;
+    let best = laneFreeAt[0];
+    for (let i = 1; i < LANES; i++) {
+      if (laneFreeAt[i] < best) {
+        best = laneFreeAt[i];
+        lane = i;
+      }
+    }
+    return lane;
+  }
+
+  // Place the time-ordered visible notes into stable lanes. visibleNotes is
+  // ascending by created_at and never includes notes newer than the playhead,
+  // so f is always >= 0 (nothing renders to the right of the playhead line).
   const placed = $derived.by<Placed[]>(() => {
     const notes = timeline.visibleNotes;
     const playhead = timeline.playheadMs;
     const win = timeline.windowMs;
+
+    // Drop cached lanes when the feed was torn down and rebuilt.
+    if (timeline.feedVersion !== laneFeedVersion) {
+      laneByNote.clear();
+      laneByAuthor.clear();
+      laneFeedVersion = timeline.feedVersion;
+    }
+
     // How much of the window one note (plus gap) covers horizontally. Derived
     // from the real container width so spacing matches the rendered box size
     // instead of a hand-tuned guess; capped so it never exceeds the window.
@@ -45,22 +85,21 @@
     const busyMs = win * busyFraction;
     const headId = timeline.headNote?.id ?? null;
     const speakingId = timeline.speakingId;
+    const muted = timeline.mutedPubkeys;
     const laneFreeAt = new Array<number>(LANES).fill(-Infinity);
     const out: Placed[] = [];
     for (const note of notes) {
       const ms = note.created_at * 1000;
       const f = (playhead - ms) / win; // 0..1 from right edge
-      // Prefer a lane that is genuinely free at this time; otherwise fall back
-      // to the lane that frees soonest (least overlap) so a note is never
-      // dropped even under bursty load.
-      let lane = 0;
-      let best = laneFreeAt[0];
-      for (let i = 1; i < LANES; i++) {
-        if (laneFreeAt[i] < best) {
-          best = laneFreeAt[i];
-          lane = i;
-        }
+      // Reuse the note's existing lane when known; only assign one the first
+      // time we see it. New notes fit around the lanes already occupied this
+      // pass, so overlaps stay reasonable while existing rows stay put.
+      let lane = laneByNote.get(note.id);
+      if (lane === undefined) {
+        lane = chooseLane(laneFreeAt, ms, laneByAuthor.get(note.pubkey));
+        laneByNote.set(note.id, lane);
       }
+      laneByAuthor.set(note.pubkey, lane);
       laneFreeAt[lane] = ms + busyMs;
       out.push({
         note,
@@ -68,10 +107,46 @@
         lane,
         isHead: note.id === headId,
         isSpeaking: note.id === speakingId,
+        isMuted: muted.has(note.pubkey),
       });
     }
     return out;
   });
+
+  // ---- tap/click menu + full-text modal ----
+  /** Note whose action menu is open, or null. */
+  let menuNote = $state<Note | null>(null);
+  /** Note whose full text is shown in the modal, or null. */
+  let fullTextNote = $state<Note | null>(null);
+
+  function openMenu(note: Note): void {
+    menuNote = note;
+  }
+
+  function closeMenu(): void {
+    menuNote = null;
+  }
+
+  function showFullText(): void {
+    fullTextNote = menuNote;
+    menuNote = null;
+  }
+
+  function toggleMute(): void {
+    if (menuNote) timeline.toggleMute(menuNote.pubkey);
+    menuNote = null;
+  }
+
+  function onOverlayKey(e: KeyboardEvent, close: () => void): void {
+    if (e.key === 'Escape') close();
+  }
+
+  function onNoteKey(e: KeyboardEvent, note: Note): void {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openMenu(note);
+    }
+  }
 
   function meta(n: Note): ProfileMeta | undefined {
     return timeline.names.get(n.pubkey);
@@ -113,11 +188,20 @@
       class="note"
       class:head={p.isHead}
       class:speaking={p.isSpeaking}
+      class:muted={p.isMuted}
       style="right: {p.f * 100}%; top: {(p.lane / LANES) * 100}%;"
+      role="button"
+      tabindex="0"
+      title="Tap for options"
+      onclick={() => openMenu(p.note)}
+      onkeydown={(e) => onNoteKey(e, p.note)}
     >
       <div class="head-row">
         {#if p.isSpeaking}
           <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
+        {/if}
+        {#if p.isMuted}
+          <span class="muted-badge" title="TTS muted for this author" aria-label="TTS muted">🔇</span>
         {/if}
         <span class="avatar" aria-hidden="true">
           <span class="avatar-fallback">{initial(p.note)}</span>
@@ -140,6 +224,49 @@
 
   <!-- playhead marker at the right edge -->
   <div class="playhead-line" aria-hidden="true"></div>
+
+  <!-- per-note action menu (opened by tapping a note) -->
+  {#if menuNote}
+    <div
+      class="overlay"
+      role="presentation"
+      onclick={closeMenu}
+      onkeydown={(e) => onOverlayKey(e, closeMenu)}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="menu" role="menu" tabindex="-1" aria-label="Note options" onclick={(e) => e.stopPropagation()}>
+        <div class="menu-title">{name(menuNote)}</div>
+        <button class="menu-item" type="button" role="menuitem" onclick={showFullText}>
+          Show full post text
+        </button>
+        <button class="menu-item" type="button" role="menuitem" onclick={toggleMute}>
+          {timeline.isMuted(menuNote.pubkey) ? 'Unmute TTS for this author' : 'Mute TTS for this author'}
+        </button>
+        <button class="menu-item cancel" type="button" role="menuitem" onclick={closeMenu}>
+          Cancel
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  <!-- full post text modal -->
+  {#if fullTextNote}
+    <div
+      class="overlay"
+      role="presentation"
+      onclick={() => (fullTextNote = null)}
+      onkeydown={(e) => onOverlayKey(e, () => (fullTextNote = null))}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Full post text" onclick={(e) => e.stopPropagation()}>
+        <div class="modal-head">{name(fullTextNote)}</div>
+        <div class="modal-body">{fullTextNote.content}</div>
+        <button class="menu-item" type="button" onclick={() => (fullTextNote = null)}>Close</button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -180,7 +307,27 @@
     font-size: 14px;
     line-height: 1.4;
     overflow: hidden;
-    pointer-events: none;
+    /* Notes are interactive: tapping one opens its action menu. */
+    pointer-events: auto;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .note:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+  }
+
+  /* An author muted for TTS: dimmed slightly so it's visible at a glance. */
+  .note.muted {
+    opacity: 0.7;
+  }
+
+  .muted-badge {
+    flex: 0 0 auto;
+    font-size: 12px;
+    line-height: 1;
+    opacity: 0.9;
   }
 
   .head-row {
@@ -288,5 +435,84 @@
     width: 2px;
     background: var(--live);
     opacity: 0.7;
+  }
+
+  /* ---- tap menu + full-text modal ---- */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.5);
+    padding: 16px;
+  }
+
+  .menu,
+  .modal {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  }
+
+  .menu {
+    min-width: 240px;
+    max-width: 90%;
+  }
+
+  .menu-title,
+  .modal-head {
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 13px;
+    padding: 2px 4px 6px;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .menu-item {
+    appearance: none;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+    padding: 8px 10px;
+    cursor: pointer;
+  }
+
+  .menu-item:hover,
+  .menu-item:focus-visible {
+    background: var(--accent-bg);
+    border-color: var(--accent-border);
+    outline: none;
+  }
+
+  .menu-item.cancel {
+    color: var(--text-dim);
+  }
+
+  .modal {
+    width: min(560px, 92%);
+    max-height: 80%;
+  }
+
+  .modal-body {
+    color: var(--text-h);
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-y: auto;
+    padding: 8px 4px;
   }
 </style>

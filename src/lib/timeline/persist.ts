@@ -22,6 +22,8 @@ export interface PlaybackState {
   manualRelays: string[];
   /** Whether to auto re-login via NIP-07 on the next session. */
   rememberLogin: boolean;
+  /** Hex pubkeys whose notes are permanently muted for TTS. */
+  mutedPubkeys: string[];
 }
 
 let dbp: Promise<IDBPDatabase> | null = null;

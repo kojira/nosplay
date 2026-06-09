@@ -16,6 +16,15 @@ This project was built to fulfill the [requirements document (要件書)](https:
   newest at the right edge (the playhead = current time). Each note shows the
   author's avatar and display name (resolved from kind:0 metadata, with an
   npub fallback), and long posts wrap and clamp instead of being truncated.
+  Each note keeps a stable vertical lane for its lifetime (assigned once, keyed
+  to its identity/author), so notes scroll horizontally without bouncing up and
+  down as the visible window slides.
+- **Note menu** — tap (or click) any note to open its options: **Show full
+  post text** opens the untruncated content in a modal, and **Mute TTS for this
+  author** permanently silences read-aloud for that note's author (pubkey).
+  Muted authors are dimmed with a 🔇 badge and still appear in the timeline;
+  the mute list persists across reloads (see *Persistence*) and can be undone
+  from the same menu.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
   (1×–20×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
@@ -57,9 +66,10 @@ This project was built to fulfill the [requirements document (要件書)](https:
 - **Relay settings** — inspect and edit the read relays the timeline fetches
   from, and choose how your manual list combines with the follow-derived one
   (see [Relays](#relays)).
-- **Persistence** — window size, speed, TTS toggle, the selected TTS voice, a
-  paused playhead position, your relay settings (mode + manual list), and a
-  "remember login" hint are saved to IndexedDB and restored on reload. Once you have logged in at least
+- **Persistence** — window size, speed, TTS toggle, the selected TTS voice, the
+  per-author TTS mute list, a paused playhead position, your relay settings
+  (mode + manual list), and a "remember login" hint are saved to IndexedDB and
+  restored on reload. Once you have logged in at least
   once, the next session silently re-attempts NIP-07 login (most signers
   remember the granted permission, so this does not re-prompt); *Log out* clears
   the hint.
