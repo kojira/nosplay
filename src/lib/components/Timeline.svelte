@@ -5,16 +5,77 @@
   import type { Note } from '../nostr/types';
 
   const LANES = 6; // vertical lanes for the comment stack
-  // A note is right-anchored at its time and grows leftward up to this pixel
-  // width (mirrors the .note CSS: max-width min(340px, 60vw)). Two same-lane
-  // notes overlap when their horizontal gap is smaller than this, so we keep a
-  // lane "busy" for exactly the time span this width occupies at the current
-  // zoom. GAP_PX adds a little breathing room between adjacent notes.
-  const MAX_NOTE_PX = 340;
-  const NOTE_VW_FRACTION = 0.6;
-  const GAP_PX = 8;
-  // Fallback fraction used before the container width is measured.
-  const FALLBACK_BUSY_FRACTION = 0.16;
+  // Each note is right-anchored at its time and grows leftward into the past,
+  // rendered as a box whose width depends on its content (mirrors the .note
+  // CSS: width:max-content; max-width:min(340px, 60vw)). Two notes on the same
+  // lane visually overlap when the older (further-left) box extends right past
+  // the newer note's anchor, so we keep a lane "busy" for exactly the time span
+  // *that note's own box* occupies at the current zoom (estNotePx → busyMs).
+  // Earlier this reserved the single MAX width for every note, which both
+  // over-reserved short notes (wasting lane time) and still let wide notes
+  // collide; the per-note, content-aware estimate below replaces that.
+  const MAX_NOTE_PX = 340; // .note max-width cap (px)
+  const MIN_NOTE_PX = 120; // floor so tiny notes still reserve breathing room
+  const NOTE_VW_FRACTION = 0.6; // .note max-width: ...60vw
+  const PAD_X = 10; // .note horizontal padding (px), both sides
+  const AVATAR_PX = 18; // .avatar width
+  const HEAD_GAP_PX = 6; // .head-row gap (avatar → author)
+  const CONTENT_FONT = 14; // .note .content font-size
+  const AUTHOR_FONT = 12; // .note .author font-size
+  const GAP_PX = 8; // base horizontal gap reserved between adjacent notes
+  const LANE_BUFFER_PX = 12; // extra cushion so same-lane neighbours never kiss
+  // Fallback fraction used before the container width is measured. Leans
+  // conservative (wide) so the un-measured first frame never packs notes too
+  // tightly; once containerW is known the per-note estimate takes over.
+  const FALLBACK_BUSY_FRACTION = 0.2;
+
+  /**
+   * True for code points that render at roughly one full em (CJK ideographs,
+   * Hiragana, Katakana, Hangul, full-width forms, common CJK punctuation). This
+   * is a Japanese-heavy app (のすたろう), so most content is full-width; Latin
+   * and other narrow glyphs are treated as ~0.55em. The 0x1100 floor catches
+   * Hangul Jamo upward; below it (Latin, Greek, Cyrillic, symbols) is narrow.
+   */
+  function isWide(cp: number): boolean {
+    return (
+      cp >= 0x1100 &&
+      (cp <= 0x115f || // Hangul Jamo
+        (cp >= 0x2e80 && cp <= 0xa4cf) || // CJK radicals … Yi
+        (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul syllables
+        (cp >= 0xf900 && cp <= 0xfaff) || // CJK compatibility ideographs
+        (cp >= 0xfe30 && cp <= 0xfe4f) || // CJK compatibility forms
+        (cp >= 0xff00 && cp <= 0xff60) || // full-width forms
+        (cp >= 0xffe0 && cp <= 0xffe6) || // full-width signs
+        (cp >= 0x1f300 && cp <= 0x1faff)) // emoji / pictographs
+    );
+  }
+
+  /** Estimate a string's single-line rendered width in px at the given font. */
+  function estTextPx(str: string, fontPx: number): number {
+    let w = 0;
+    for (const ch of str) {
+      const cp = ch.codePointAt(0) ?? 0;
+      w += isWide(cp) ? fontPx : fontPx * 0.55;
+    }
+    return w;
+  }
+
+  /**
+   * Estimate a note's rendered horizontal px occupancy from its author label and
+   * content, clamped to the real CSS max width. The box wraps and clamps content
+   * to 3 lines, so its width is roughly the wider of the head row (avatar + gap +
+   * author text) and the *capped* single-line content estimate, plus padding.
+   * Result is clamped into [MIN_NOTE_PX, maxNotePx]. `maxNotePx` is the effective
+   * CSS max for the current container; pass MAX_NOTE_PX before it is measured.
+   */
+  function estNotePx(authorText: string, content: string, maxNotePx: number): number {
+    const innerMax = Math.max(MIN_NOTE_PX - PAD_X * 2, maxNotePx - PAD_X * 2);
+    const headRow = AVATAR_PX + HEAD_GAP_PX + estTextPx(authorText, AUTHOR_FONT);
+    const contentLine = Math.min(estTextPx(content, CONTENT_FONT), innerMax);
+    const inner = Math.max(headRow, contentLine);
+    const total = inner + PAD_X * 2;
+    return Math.min(maxNotePx, Math.max(MIN_NOTE_PX, total));
+  }
 
   /** Measured timeline width (px); drives the busy-interval calculation. */
   let containerW = $state(0);
@@ -76,13 +137,10 @@
       laneFeedVersion = timeline.feedVersion;
     }
 
-    // How much of the window one note (plus gap) covers horizontally. Derived
-    // from the real container width so spacing matches the rendered box size
-    // instead of a hand-tuned guess; capped so it never exceeds the window.
-    const noteWidthPx = Math.min(MAX_NOTE_PX, containerW * NOTE_VW_FRACTION) + GAP_PX;
-    const busyFraction =
-      containerW > 0 ? Math.min(noteWidthPx / containerW, 1) : FALLBACK_BUSY_FRACTION;
-    const busyMs = win * busyFraction;
+    // Effective CSS max note width for the current container (min(340px, 60vw)).
+    // Before the container is measured (containerW === 0) fall back to the px cap.
+    const maxNotePx = containerW > 0 ? Math.min(MAX_NOTE_PX, containerW * NOTE_VW_FRACTION) : MAX_NOTE_PX;
+    const measured = containerW > 0;
     const headId = timeline.headNote?.id ?? null;
     const speakingId = timeline.speakingId;
     const muted = timeline.mutedPubkeys;
@@ -100,6 +158,12 @@
         laneByNote.set(note.id, lane);
       }
       laneByAuthor.set(note.pubkey, lane);
+      // Reserve this lane for exactly the time span this note's own box covers.
+      // Content-aware (vs. the old single MAX width for every note): short notes
+      // free their lane sooner, wide notes hold it longer so they can't collide.
+      const busyMs = measured
+        ? win * Math.min((estNotePx(name(note), note.content, maxNotePx) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
+        : win * FALLBACK_BUSY_FRACTION;
       laneFreeAt[lane] = ms + busyMs;
       out.push({
         note,
