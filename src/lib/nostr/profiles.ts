@@ -4,11 +4,13 @@ import { pool } from './pool';
 
 export interface ProfileMeta {
   name?: string;
+  /** Avatar image URL from the kind:0 `picture` field, if present. */
+  picture?: string;
 }
 
 /**
  * Fetch kind:0 metadata for the given authors and return a map of
- * pubkey -> { name }. Defensive: malformed JSON is ignored.
+ * pubkey -> { name, picture }. Defensive: malformed JSON is ignored.
  */
 export async function fetchProfiles(
   authors: string[],
@@ -27,14 +29,27 @@ export async function fetchProfiles(
     }
     for (const [pk, e] of newestByPk) {
       try {
-        const parsed = JSON.parse(e.content) as { name?: unknown; display_name?: unknown };
-        const name =
-          typeof parsed.name === 'string'
-            ? parsed.name
-            : typeof parsed.display_name === 'string'
-              ? parsed.display_name
+        const parsed = JSON.parse(e.content) as {
+          name?: unknown;
+          display_name?: unknown;
+          displayName?: unknown;
+          picture?: unknown;
+        };
+        // Prefer an explicit display name, fall back to the handle.
+        const displayName =
+          typeof parsed.display_name === 'string' && parsed.display_name.trim()
+            ? parsed.display_name
+            : typeof parsed.displayName === 'string' && parsed.displayName.trim()
+              ? parsed.displayName
               : undefined;
-        out.set(pk, { name });
+        const handle =
+          typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name : undefined;
+        const name = displayName ?? handle;
+        const picture =
+          typeof parsed.picture === 'string' && /^https?:\/\//i.test(parsed.picture)
+            ? parsed.picture
+            : undefined;
+        out.set(pk, { name, picture });
       } catch {
         // ignore malformed metadata
       }

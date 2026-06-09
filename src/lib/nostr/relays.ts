@@ -3,19 +3,15 @@
 // public, well-known accounts used here only as real fallback example authors.
 
 export const BOOTSTRAP_RELAYS: string[] = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-  'wss://relay.primal.net',
+  'wss://yabu.me',
+  'wss://r.kojira.io',
+  'wss://x.kojira.io',
 ];
 
 export const FALLBACK_RELAYS: string[] = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.nostr.band',
-  'wss://relay.primal.net',
-  'wss://nostr.wine',
-  'wss://relay.snort.social',
+  'wss://yabu.me',
+  'wss://r.kojira.io',
+  'wss://x.kojira.io',
 ];
 
 // Public, well-known active accounts (hex pubkeys) used as real fallback authors.

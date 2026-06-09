@@ -119,6 +119,9 @@ export class TimelineStore {
   #followAuthors: string[] = [];
   /** Remembered intent to auto-login on next connect (persisted). */
   #rememberLogin = false;
+  /** Pubkeys of arrived notes whose profile (kind:0) is not yet loaded. */
+  #pendingProfilePks = new Set<string>();
+  #profileTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ---- persistence (IndexedDB via persist.ts) ----
   #persistReady = false; // true once the saved state has been loaded/applied
@@ -495,7 +498,32 @@ export class TimelineStore {
       this.earliestMs = arr[0].created_at * 1000;
     }
 
+    // Lazily resolve the author's profile (name + avatar) if we don't have it
+    // yet. The limited-mode global feed surfaces arbitrary authors that are not
+    // in the follow list, so without this most notes would show no name/icon.
+    this.#queueProfile(note.pubkey);
+
     this.#maybeSpeakHead();
+  }
+
+  /** Queue an author pubkey for a debounced batched kind:0 profile fetch. */
+  #queueProfile(pubkey: string): void {
+    if (this.names.has(pubkey) || this.#pendingProfilePks.has(pubkey)) return;
+    this.#pendingProfilePks.add(pubkey);
+    if (this.#profileTimer !== null) return;
+    this.#profileTimer = setTimeout(() => {
+      this.#profileTimer = null;
+      void this.#flushProfiles();
+    }, 500);
+  }
+
+  /** Fetch queued unknown profiles in one batch and merge them into `names`. */
+  async #flushProfiles(): Promise<void> {
+    const pks = [...this.#pendingProfilePks].filter((pk) => !this.names.has(pk));
+    this.#pendingProfilePks.clear();
+    if (pks.length === 0) return;
+    // Cap per batch so a busy global feed can't issue an unbounded query.
+    await this.#loadNames(pks.slice(0, 200), this.activeReadRelays);
   }
 
   #maybeSpeakHead(): void {
@@ -632,6 +660,10 @@ export class TimelineStore {
       this.#persistStop = null;
     }
     this.#persistReady = false;
+    if (this.#profileTimer !== null) {
+      clearTimeout(this.#profileTimer);
+      this.#profileTimer = null;
+    }
     this.#closeSubs();
     if (this.status !== 'error') this.status = 'idle';
   }

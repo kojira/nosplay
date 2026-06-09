@@ -11,7 +11,9 @@ no sample or fake posts.
 ## Features
 
 - **Live timeline** — kind:1 notes laid out by time across the full screen,
-  newest at the right edge (the playhead = current time).
+  newest at the right edge (the playhead = current time). Each note shows the
+  author's avatar and display name (resolved from kind:0 metadata, with an
+  npub fallback), and long posts wrap and clamp instead of being truncated.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
   (1×–60×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
@@ -88,8 +90,10 @@ The **relay mode** decides how the two combine into the relays actually used
 | **Manual**         | Manual relays only — a full **override** of the follow-derived list. |
 
 In every mode, if the chosen set is empty (e.g. *Auto* before login, or *Manual*
-with no URLs), nosplay falls back to a built-in list of well-known public relays
-so reads never go dark. Click **Apply & reconnect** to save the settings (they
+with no URLs), nosplay falls back to its built-in default relays
+(`wss://yabu.me`, `wss://r.kojira.io`, `wss://x.kojira.io`) so reads never go
+dark. These defaults are also used to bootstrap follow/relay-list discovery at
+login. Click **Apply & reconnect** to save the settings (they
 persist to IndexedDB) and rebuild the feed. Notes you post are published to the
 same active read-relay set.
 

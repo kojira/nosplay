@@ -1,12 +1,14 @@
 <script lang="ts">
   import { timeline } from '../timeline/store.svelte';
   import { shortNpub } from '../timeline/format';
+  import type { ProfileMeta } from '../nostr/profiles';
   import type { Note } from '../nostr/types';
 
-  const LANES = 8; // vertical lanes for the comment stack
-  // Approximate seconds of horizontal space a comment occupies, used to keep a
-  // lane "busy" so the next note doesn't overlap it.
-  const LANE_BUSY_MS = 14_000;
+  const LANES = 6; // vertical lanes for the comment stack
+  // Fraction of the visible window a single note occupies horizontally. Used to
+  // keep a lane "busy" so the next note in that lane doesn't overlap it. Scales
+  // with windowMs so spacing stays sane at every zoom level.
+  const LANE_BUSY_FRACTION = 0.16;
 
   interface Placed {
     note: Note;
@@ -17,11 +19,14 @@
   }
 
   // Assign lanes greedily over the time-ordered visible notes so labels do not
-  // overlap. visibleNotes is ascending by created_at.
+  // overlap. visibleNotes is ascending by created_at and never includes notes
+  // newer than the playhead, so f is always >= 0 (nothing renders to the right
+  // of the playhead line).
   const placed = $derived.by<Placed[]>(() => {
     const notes = timeline.visibleNotes;
     const playhead = timeline.playheadMs;
     const win = timeline.windowMs;
+    const busyMs = win * LANE_BUSY_FRACTION;
     const headId = timeline.headNote?.id ?? null;
     const laneFreeAt = new Array<number>(LANES).fill(-Infinity);
     const out: Placed[] = [];
@@ -37,14 +42,28 @@
           lane = i;
         }
       }
-      laneFreeAt[lane] = ms + LANE_BUSY_MS;
+      laneFreeAt[lane] = ms + busyMs;
       out.push({ note, f, lane, isHead: note.id === headId });
     }
     return out;
   });
 
+  function meta(n: Note): ProfileMeta | undefined {
+    return timeline.names.get(n.pubkey);
+  }
+
   function name(n: Note): string {
-    return timeline.names.get(n.pubkey)?.name ?? shortNpub(n.pubkey);
+    return meta(n)?.name ?? shortNpub(n.pubkey);
+  }
+
+  function initial(n: Note): string {
+    const nm = meta(n)?.name;
+    return (nm ?? n.pubkey).slice(0, 1).toUpperCase();
+  }
+
+  // Hide a broken avatar image so the letter fallback (behind it) shows through.
+  function onAvatarError(e: Event): void {
+    (e.currentTarget as HTMLImageElement).style.display = 'none';
   }
 </script>
 
@@ -65,7 +84,22 @@
       class:head={p.isHead}
       style="right: {p.f * 100}%; top: {(p.lane / LANES) * 100}%;"
     >
-      <span class="author">{name(p.note)}</span>
+      <div class="head-row">
+        <span class="avatar" aria-hidden="true">
+          <span class="avatar-fallback">{initial(p.note)}</span>
+          {#if meta(p.note)?.picture}
+            <img
+              class="avatar-img"
+              src={meta(p.note)?.picture}
+              alt=""
+              loading="lazy"
+              referrerpolicy="no-referrer"
+              onerror={onAvatarError}
+            />
+          {/if}
+        </span>
+        <span class="author">{name(p.note)}</span>
+      </div>
       <span class="content">{p.note.content}</span>
     </div>
   {/each}
@@ -95,30 +129,82 @@
 
   .note {
     position: absolute;
-    transform: translateX(50%);
-    white-space: nowrap;
-    max-width: 46vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    padding: 4px 10px;
+    /* Right-anchored at the note's time position; content grows leftward into
+       the past, so a note never spills past the playhead (right edge). */
+    width: max-content;
+    max-width: min(340px, 60vw);
+    max-height: calc((100% / 6) - 8px);
+    margin-right: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 10px;
     border-radius: 8px;
-    background: rgba(28, 31, 41, 0.78);
+    background: rgba(28, 31, 41, 0.82);
     border: 1px solid var(--border);
     color: var(--text);
     font-size: 14px;
-    line-height: 1.45;
+    line-height: 1.4;
+    overflow: hidden;
     pointer-events: none;
+  }
+
+  .head-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .avatar {
+    position: relative;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--accent-bg);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .avatar-fallback {
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+  }
+
+  .avatar-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
   }
 
   .note .author {
     color: var(--accent);
     font-weight: 600;
-    margin-right: 6px;
     font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
 
   .note .content {
     color: var(--text-h);
+    /* Wrap long posts and clamp to a few lines instead of harshly truncating
+       to a single ellipsised line. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
   }
 
   .note.head {
