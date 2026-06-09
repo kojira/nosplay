@@ -103,6 +103,93 @@ export interface AiBgDebug {
   notEnoughText: boolean;
   /** Extra characters of feed text needed to clear AI_MIN_CHARS (0 when met). */
   charsNeeded: number;
+
+  // ---- DOM / layer verification (measured by Timeline.svelte) ----------
+  // These describe whether the generated SVG actually made it onto the page
+  // and can be seen, as opposed to merely existing as a string in the store.
+  // Set via reportAiBgDom() after each render; 0/''/false until measured.
+  /** True when an <svg> element for the AI background was found in the DOM. */
+  domInserted: boolean;
+  /** outerHTML length of the inserted <svg>, or 0 when none was found. */
+  domSvgChars: number;
+  /** viewBox attribute read off the inserted <svg> ('' when absent). */
+  viewBox: string;
+  /** Measured pixel size of the .ai-bg layer (rounded; 0 before layout). */
+  domWidth: number;
+  domHeight: number;
+  /** Computed opacity of the .ai-bg layer (0..1; 0 means invisible). */
+  opacity: number;
+  /** Computed z-index of the .ai-bg layer as a string ('auto' / number). */
+  zIndex: string;
+  /** Epoch ms of the last DOM measurement (0 = never measured). */
+  domCheckedAt: number;
+}
+
+/** One DOM measurement of the rendered AI background, or null when absent. */
+export interface AiBgDomMeasurement {
+  inserted: boolean;
+  svgChars: number;
+  viewBox: string;
+  width: number;
+  height: number;
+  opacity: number;
+  zIndex: string;
+}
+
+/**
+ * A plain YES/NO verdict on the AI background, derived from a debug snapshot.
+ * The whole point is to answer "is SVG generation actually working?" without
+ * having to eyeball a dozen fields: `svgGenerated` is the generation answer,
+ * `visible` is the end-to-end answer (generated AND on-screen), and `reasons`
+ * lists every blocker so a NO is self-explanatory.
+ */
+export interface AiBgVerdict {
+  /** A non-empty SVG string was produced on the last render. */
+  svgGenerated: boolean;
+  /** An <svg> for it was found in the DOM. */
+  domInserted: boolean;
+  /** The layer has non-zero size and non-zero opacity (so it can show). */
+  layered: boolean;
+  /** End-to-end: enabled AND generated AND inserted AND layered. */
+  visible: boolean;
+  /** Human-readable blockers; empty array when everything checks out. */
+  reasons: string[];
+}
+
+/**
+ * Reduce a debug snapshot to a YES/NO verdict. Pure (no reactive reads) so it
+ * can be used both in the console logger and in a `$derived` in the UI.
+ */
+export function aiBgVerdict(
+  debug: AiBgDebug,
+  svg: string,
+  enabled: boolean,
+): AiBgVerdict {
+  const svgGenerated = svg.length > 0 && debug.svgChars > 0;
+  const domInserted = debug.domInserted;
+  const layered =
+    debug.domWidth > 0 && debug.domHeight > 0 && debug.opacity > 0;
+  const visible = enabled && svgGenerated && domInserted && layered;
+
+  const reasons: string[] = [];
+  if (!enabled) reasons.push('feature toggled off');
+  if (!svgGenerated) {
+    if (debug.notEnoughText)
+      reasons.push(`not enough text (need ~${debug.charsNeeded} more chars)`);
+    else if (debug.renderMode === 'none' && debug.lastRunAt > 0)
+      reasons.push('summary came back empty');
+    else if (debug.lastRunAt === 0) reasons.push('no summarization run yet');
+    else reasons.push('no SVG produced');
+  } else {
+    if (!domInserted)
+      reasons.push('SVG not inserted into the DOM (no <svg> element found)');
+    else {
+      if (debug.domWidth === 0 || debug.domHeight === 0)
+        reasons.push('background layer has zero size');
+      if (debug.opacity === 0) reasons.push('layer opacity is 0');
+    }
+  }
+  return { svgGenerated, domInserted, layered, visible, reasons };
 }
 
 /** A fresh, empty debug snapshot (feature off / never run). */
@@ -125,6 +212,14 @@ function emptyAiBgDebug(): AiBgDebug {
     sceneModelReady: false,
     notEnoughText: false,
     charsNeeded: 0,
+    domInserted: false,
+    domSvgChars: 0,
+    viewBox: '',
+    domWidth: 0,
+    domHeight: 0,
+    opacity: 0,
+    zIndex: '',
+    domCheckedAt: 0,
   };
 }
 
@@ -1414,7 +1509,9 @@ export class TimelineStore {
           scene,
         };
       }
-      this.#logAiDebug();
+      // The structured console log is emitted from reportAiBgDom() once the
+      // Timeline view has measured where this SVG landed in the DOM, so the
+      // logged `dom` evidence matches the SVG that was just set above.
     } catch (err) {
       if (runId !== this.#aiRunId) return;
       this.aiBgStatus = 'error';
@@ -1429,27 +1526,84 @@ export class TimelineStore {
   /**
    * Log a structured snapshot of the last AI background run to the console.
    * Always on (not DEV-gated) — the whole point is to make the feature easy to
-   * inspect in any build, including the SVG/scene render result.
+   * inspect in any build. The headline line answers the only question that
+   * matters at a glance — "is SVG generation working?" — as a literal YES/NO,
+   * and the attached object groups the supporting evidence (generation, DOM
+   * insertion + layering, source slice) so a NO is self-explanatory.
+   *
+   * Called from reportAiBgDom() (the DOM-verification phase) so the logged
+   * `dom` fields reflect the SVG that was actually measured on the page, not a
+   * stale prior render. `phase` notes what triggered the log.
    */
-  #logAiDebug(): void {
+  #logAiDebug(phase: 'render' | 'cleared' | 'toggle'): void {
     const d = this.aiBgDebug;
-    console.info('[nosplay/ai-bg]', {
-      status: this.aiBgStatus,
-      renderMode: d.renderMode,
-      sceneModelReady: d.sceneModelReady,
-      scene: d.scene,
-      visibleCount: d.visibleCount,
-      summarizedCount: d.summarizedCount,
-      inputChars: d.inputChars,
-      inputTruncated: d.inputTruncated,
-      summaryChars: d.summaryChars,
-      svgChars: d.svgChars,
-      windowMs: { start: d.windowStartMs, end: d.windowEndMs },
-      sliceMs: { start: d.sliceStartMs, end: d.sliceEndMs },
-      lastRunAt: d.lastRunAt,
-      lastSummaryAt: d.lastSummaryAt,
-      summary: this.aiBgSummary,
-    });
+    const v = aiBgVerdict(d, this.aiBgSvg, this.aiBgEnabled);
+    console.info(
+      `[nosplay/ai-bg] SVG generated: ${v.svgGenerated ? 'YES' : 'NO'} · ` +
+        `on screen: ${v.visible ? 'YES' : 'NO'}` +
+        (v.reasons.length ? ` · ${v.reasons.join('; ')}` : ''),
+      {
+        phase,
+        verdict: v,
+        status: this.aiBgStatus,
+        generation: {
+          renderMode: d.renderMode,
+          sceneModelReady: d.sceneModelReady,
+          scene: d.scene,
+          summaryChars: d.summaryChars,
+          svgChars: d.svgChars,
+        },
+        dom: {
+          inserted: d.domInserted,
+          svgChars: d.domSvgChars,
+          viewBox: d.viewBox,
+          width: d.domWidth,
+          height: d.domHeight,
+          opacity: d.opacity,
+          zIndex: d.zIndex,
+          checkedAt: d.domCheckedAt,
+        },
+        source: {
+          visibleCount: d.visibleCount,
+          summarizedCount: d.summarizedCount,
+          inputChars: d.inputChars,
+          inputTruncated: d.inputTruncated,
+          windowMs: { start: d.windowStartMs, end: d.windowEndMs },
+          sliceMs: { start: d.sliceStartMs, end: d.sliceEndMs },
+        },
+        lastRunAt: d.lastRunAt,
+        lastSummaryAt: d.lastSummaryAt,
+        summary: this.aiBgSummary,
+      },
+    );
+  }
+
+  /**
+   * Record where the rendered SVG ended up in the DOM, as measured by the
+   * Timeline view after Svelte flushes each `aiBgSvg` change. This is what lets
+   * the debug verdict distinguish "SVG generated but not on screen" from
+   * "generated and visible". Pass null when the layer is absent (feature off,
+   * no SVG, or the element isn't mounted). Also emits the structured console
+   * log, so the log always carries fresh DOM evidence.
+   */
+  reportAiBgDom(m: AiBgDomMeasurement | null): void {
+    this.aiBgDebug = {
+      ...this.aiBgDebug,
+      domInserted: m?.inserted ?? false,
+      domSvgChars: m?.svgChars ?? 0,
+      viewBox: m?.viewBox ?? '',
+      domWidth: m?.width ?? 0,
+      domHeight: m?.height ?? 0,
+      opacity: m?.opacity ?? 0,
+      zIndex: m?.zIndex ?? '',
+      domCheckedAt: m ? Date.now() : 0,
+    };
+    // Only log meaningful transitions: a rendered SVG (m present) or the layer
+    // going away while the feature is still on (cleared). Skip the null report
+    // that fires merely because the feature was toggled off — #stopAiBackground
+    // resets everything and the panel reflects it.
+    if (m) this.#logAiDebug('render');
+    else if (this.aiBgEnabled) this.#logAiDebug('cleared');
   }
 
   /** Stop the feature: tear down the session and clear all derived output. */

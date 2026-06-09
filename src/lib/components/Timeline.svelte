@@ -80,6 +80,50 @@
   /** Measured timeline width (px); drives the busy-interval calculation. */
   let containerW = $state(0);
 
+  /** The AI-background layer element, bound when the feature renders an SVG. */
+  let aiBgEl = $state<HTMLDivElement | null>(null);
+
+  // Verify, after every SVG swap, that the background actually landed in the
+  // DOM and is laid out so it can be seen, then report the measurement back to
+  // the store. This is what turns the store's debug snapshot from "we built an
+  // SVG string" into "an <svg> is on the page at this size/opacity/z-index",
+  // which is the difference the YES/NO verdict hinges on. Reading aiBgSvg /
+  // aiBgEnabled makes the effect re-run on each render; it never reads
+  // aiBgDebug, so writing the measurement back cannot form a runes loop.
+  $effect(() => {
+    const svg = timeline.aiBgSvg;
+    const enabled = timeline.aiBgEnabled;
+    const el = aiBgEl;
+    if (!enabled || !svg || !el) {
+      timeline.reportAiBgDom(null);
+      return;
+    }
+    const svgEl = el.querySelector('svg');
+    if (!svgEl) {
+      timeline.reportAiBgDom({
+        inserted: false,
+        svgChars: 0,
+        viewBox: '',
+        width: 0,
+        height: 0,
+        opacity: 0,
+        zIndex: '',
+      });
+      return;
+    }
+    const cs = getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    timeline.reportAiBgDom({
+      inserted: true,
+      svgChars: svgEl.outerHTML.length,
+      viewBox: svgEl.getAttribute('viewBox') ?? '',
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      opacity: Number.parseFloat(cs.opacity) || 0,
+      zIndex: cs.zIndex,
+    });
+  });
+
   interface Placed {
     note: Note;
     /** 0 = right edge (playhead), 1 = left edge (window start). */
@@ -243,7 +287,7 @@
   {#if timeline.aiBgEnabled && timeline.aiBgSvg}
     <!-- eslint-disable-next-line svelte/no-at-html-tags — SVG is generated
          locally from a deterministic template, not user HTML. -->
-    <div class="ai-bg" aria-hidden="true">{@html timeline.aiBgSvg}</div>
+    <div class="ai-bg" aria-hidden="true" bind:this={aiBgEl}>{@html timeline.aiBgSvg}</div>
   {/if}
 
   {#if placed.length === 0}

@@ -5,6 +5,7 @@
   import { timeline } from './lib/timeline/store.svelte';
   import { hms, shortNpub } from './lib/timeline/format';
   import { parseShareParams, buildShareUrl } from './lib/share';
+  import { aiBgVerdict } from './lib/timeline/store.svelte';
   import type { RelayMode } from './lib/timeline/store.svelte';
 
   // ---- local UI state --------------------------------------------------
@@ -99,6 +100,21 @@
   );
   const aiWindowLabel = $derived(
     aiHasRun ? `${hms(aiDebug.windowStartMs)}–${hms(aiDebug.windowEndMs)}` : '—',
+  );
+
+  // The headline YES/NO verdict: is SVG generation actually working, and did the
+  // result make it onto the screen? Derived from the same snapshot the store
+  // logs, so the panel and the console always agree.
+  const aiVerdict = $derived(
+    aiBgVerdict(aiDebug, timeline.aiBgSvg, timeline.aiBgEnabled),
+  );
+  // Compact DOM-layer summary (size · opacity · z-index) for the debug panel.
+  const aiDomLabel = $derived(
+    aiDebug.domCheckedAt === 0
+      ? '—'
+      : aiDebug.domInserted
+        ? `${aiDebug.domWidth}×${aiDebug.domHeight} · opacity ${aiDebug.opacity} · z ${aiDebug.zIndex || 'auto'}`
+        : 'not in DOM',
   );
 
   // ---- auth / follow / relay UI ---------------------------------------
@@ -507,8 +523,31 @@
       </div>
 
       <details class="ai-debug">
-        <summary>AI debug — summary &amp; source range</summary>
+        <summary>AI debug — SVG generation: {aiVerdict.svgGenerated ? 'YES' : 'NO'}</summary>
         <div class="ai-debug-body">
+          <!-- Headline verdict: answers "is SVG generation working?" at a glance,
+               with a second badge for whether it actually reached the screen. -->
+          <div class="ai-verdict" role="status">
+            <span
+              class="ai-badge"
+              class:yes={aiVerdict.svgGenerated}
+              class:no={!aiVerdict.svgGenerated}
+            >
+              SVG generated: {aiVerdict.svgGenerated ? 'YES' : 'NO'}
+            </span>
+            <span
+              class="ai-badge"
+              class:yes={aiVerdict.visible}
+              class:no={!aiVerdict.visible}
+            >
+              On screen: {aiVerdict.visible ? 'YES' : 'NO'}
+            </span>
+          </div>
+          {#if aiVerdict.reasons.length}
+            <div class="ai-verdict-reasons">
+              Blocked by: {aiVerdict.reasons.join('; ')}.
+            </div>
+          {/if}
           <div
             class="ai-debug-summary"
             class:placeholder={!timeline.aiBgSummary}
@@ -536,8 +575,23 @@
               <dd>{aiDebug.inputChars} chars{aiDebug.inputTruncated ? ' (truncated)' : ''}</dd>
             </div>
             <div><dt>summary</dt><dd>{aiDebug.summaryChars} chars</dd></div>
-            <div><dt>svg</dt><dd>{aiDebug.svgChars} chars</dd></div>
+            <div>
+              <dt>svg</dt>
+              <dd>{aiDebug.svgChars} chars{aiDebug.svgChars === 0 ? ' (empty)' : ''}</dd>
+            </div>
             <div><dt>render</dt><dd>{aiRenderLabel}</dd></div>
+            <div>
+              <dt>in DOM</dt>
+              <dd>
+                {aiDebug.domCheckedAt === 0
+                  ? '—'
+                  : aiDebug.domInserted
+                    ? `yes (${aiDebug.domSvgChars} chars)`
+                    : 'no'}
+              </dd>
+            </div>
+            <div><dt>viewBox</dt><dd>{aiDebug.viewBox || '—'}</dd></div>
+            <div><dt>layer</dt><dd>{aiDomLabel}</dd></div>
             <div>
               <dt>last run</dt>
               <dd>{aiHasRun ? hms(aiDebug.lastRunAt) : '—'}</dd>
@@ -937,6 +991,36 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+  /* Headline YES/NO badges — the at-a-glance answer. Kept small and muted so
+     the panel stays a quiet diagnostic, not a billboard; colour carries the
+     signal (green = YES, amber = NO) without raising the overall contrast. */
+  .ai-verdict {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .ai-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border: 1px solid transparent;
+  }
+  .ai-badge.yes {
+    color: #6cc070;
+    background: rgba(108, 192, 112, 0.12);
+    border-color: rgba(108, 192, 112, 0.35);
+  }
+  .ai-badge.no {
+    color: #e0b341;
+    background: rgba(224, 179, 65, 0.12);
+    border-color: rgba(224, 179, 65, 0.35);
+  }
+  .ai-verdict-reasons {
+    color: var(--text-dim);
+    line-height: 1.4;
   }
   .ai-debug-summary {
     max-height: 4.5em;
