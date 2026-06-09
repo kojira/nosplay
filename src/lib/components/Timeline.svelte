@@ -88,8 +88,11 @@
   // the store. This is what turns the store's debug snapshot from "we built an
   // SVG string" into "an <svg> is on the page at this size/opacity/z-index",
   // which is the difference the YES/NO verdict hinges on. Reading aiBgSvg /
-  // aiBgEnabled makes the effect re-run on each render; it never reads
-  // aiBgDebug, so writing the measurement back cannot form a runes loop.
+  // aiBgEnabled makes the effect re-run on each render. reportAiBgDom() reads
+  // *and* writes aiBgDebug, so aiBgDebug is in fact a tracked dependency of this
+  // effect — the loop is broken on the store side, where reportAiBgDom() skips
+  // the write when the measurement is unchanged (idempotent), so the effect
+  // settles instead of re-dirtying itself.
   $effect(() => {
     const svg = timeline.aiBgSvg;
     const enabled = timeline.aiBgEnabled;

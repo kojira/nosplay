@@ -1587,8 +1587,8 @@ export class TimelineStore {
    * log, so the log always carries fresh DOM evidence.
    */
   reportAiBgDom(m: AiBgDomMeasurement | null): void {
-    this.aiBgDebug = {
-      ...this.aiBgDebug,
+    const prev = this.aiBgDebug;
+    const next = {
       domInserted: m?.inserted ?? false,
       domSvgChars: m?.svgChars ?? 0,
       viewBox: m?.viewBox ?? '',
@@ -1596,6 +1596,27 @@ export class TimelineStore {
       domHeight: m?.height ?? 0,
       opacity: m?.opacity ?? 0,
       zIndex: m?.zIndex ?? '',
+    };
+    // Idempotency guard. This runs from a Timeline `$effect`, and the spread of
+    // `prev` below reads aiBgDebug — which makes aiBgDebug a tracked dependency
+    // of that effect. Writing a *fresh* object every call (the old behaviour,
+    // where domCheckedAt: Date.now() guaranteed inequality) therefore re-dirtied
+    // the effect and re-ran it without end → effect_update_depth_exceeded. When
+    // the DOM measurement hasn't actually changed we must NOT write, so the
+    // effect settles. domCheckedAt is intentionally excluded from the compare
+    // (a re-measure with identical results is not a meaningful change).
+    const unchanged =
+      prev.domInserted === next.domInserted &&
+      prev.domSvgChars === next.domSvgChars &&
+      prev.viewBox === next.viewBox &&
+      prev.domWidth === next.domWidth &&
+      prev.domHeight === next.domHeight &&
+      prev.opacity === next.opacity &&
+      prev.zIndex === next.zIndex;
+    if (unchanged) return;
+    this.aiBgDebug = {
+      ...prev,
+      ...next,
       domCheckedAt: m ? Date.now() : 0,
     };
     // Only log meaningful transitions: a rendered SVG (m present) or the layer
