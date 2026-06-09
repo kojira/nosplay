@@ -16,7 +16,11 @@
   let postMode = $state<'current' | 'playback'>('current');
   let posting = $state(false);
 
-  const SPEED_OPTIONS = [1.0, 1.2, 1.5, 2.0];
+  const SPEED_OPTIONS = [1, 1.5, 2, 3, 5, 8, 10, 15, 20];
+  /** Drop trailing ".0" so 1× / 1.5× / 20× all read cleanly. */
+  function speedLabel(s: number): string {
+    return `${Number.isInteger(s) ? s : s.toFixed(1)}×`;
+  }
   const WINDOW_OPTIONS = [
     { ms: 60_000, label: '1 min' },
     { ms: 300_000, label: '5 min' },
@@ -332,7 +336,7 @@
           <span>Speed</span>
           <select value={String(timeline.speed)} onchange={onSpeedChange}>
             {#each SPEED_OPTIONS as s (s)}
-              <option value={String(s)}>{s.toFixed(1)}×</option>
+              <option value={String(s)}>{speedLabel(s)}</option>
             {/each}
           </select>
         </label>

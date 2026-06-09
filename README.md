@@ -15,7 +15,7 @@ no sample or fake posts.
   author's avatar and display name (resolved from kind:0 metadata, with an
   npub fallback), and long posts wrap and clamp instead of being truncated.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
-  (1×–60×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
+  (1×–20×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
   `datetime-local` jump to seek to any past moment within the loaded history.
 - **Text-to-speech** — optional read-aloud of new notes via the browser's
