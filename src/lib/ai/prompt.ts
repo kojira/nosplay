@@ -137,7 +137,9 @@ export async function createSvgModel(
 
 /**
  * Ask Gemini Nano for an abstract background SVG matching `summary`'s mood.
- * Returns the model's RAW text output (expected to be SVG markup). The caller
+ * Returns the model's RAW text output VERBATIM (expected to be SVG markup; no
+ * trimming or normalization, so callers/diagnostics see exactly what the model
+ * emitted). The caller
  * MUST pass this through the strict validator/sanitizer before any DOM use —
  * this function performs no validation and never falls back. Throws on prompt
  * failure (aborted, model error, etc.).
@@ -154,5 +156,8 @@ export async function promptSvg(
     `<svg> with viewBox "0 0 ${SVG_VIEW_W} ${SVG_VIEW_H}", only the allowed ` +
     'shape/gradient elements, faint and ambient, absolutely no text. Reply with ' +
     'the SVG markup only.';
-  return (await model.prompt(input, { signal })).trim();
+  // Verbatim: no trim/normalization, so the validator and diagnostics see
+  // exactly what the model emitted (including any leading/trailing prose
+  // around the <svg> block).
+  return await model.prompt(input, { signal });
 }

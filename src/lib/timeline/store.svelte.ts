@@ -25,7 +25,7 @@ import {
   createSummarizer,
   type SummarizerInstance,
 } from '../ai/summarizer';
-import { validateAndSanitizeSvg } from '../ai/sanitize';
+import { inspectSvg } from '../ai/sanitize';
 import {
   isLanguageModelSupported,
   languageModelAvailability,
@@ -1466,13 +1466,23 @@ export class TimelineStore {
         reason: 'SVG generation failed: ' + errMessage(err),
       };
     }
-    const result = validateAndSanitizeSvg(raw);
+    const result = inspectSvg(raw);
     if (!result.ok) {
+      // Make the runtime reason precise: the failure stage plus, when the model
+      // wrapped the <svg> in prose, how much of the raw output was actually the
+      // SVG block and on which side the noise sat.
+      const noise =
+        result.hasPrefixNoise || result.hasSuffixNoise
+          ? ` (extracted ${result.extractedLength} of ${result.rawLength} chars; ` +
+            `${[result.hasPrefixNoise ? 'leading' : '', result.hasSuffixNoise ? 'trailing' : '']
+              .filter(Boolean)
+              .join('+')} text around <svg>)`
+          : '';
       return {
         svg: '',
         valid: false,
         rawChars: raw.length,
-        reason: 'Generated SVG failed validation: ' + result.reason,
+        reason: `Generated SVG failed validation [${result.stage}]: ${result.reason}${noise}`,
       };
     }
     return { svg: result.svg, valid: true, rawChars: raw.length, reason: '' };

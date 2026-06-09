@@ -8,12 +8,67 @@
 // data: references, etc.). There is NO fallback — on any violation the caller
 // shows no background and surfaces the reason.
 //
-// Result is a discriminated union so callers branch on `ok` and always have a
-// concrete `reason` to display when validation fails.
+// Two entry points:
+//  - validateAndSanitizeSvg(): the simple OK/REASON API callers use in product
+//    code; a thin wrapper over the inspector.
+//  - inspectSvg(): the detailed diagnostic API. Same checks, but it reports the
+//    exact failure STAGE, the offending element/attribute/value, how much raw
+//    output there was, how much of it was the extracted <svg> block, and whether
+//    there was leading/trailing noise around that block — everything needed to
+//    tell "the model emitted junk" apart from "the validator rejected good art".
 
 export type SvgValidation =
   | { ok: true; svg: string }
   | { ok: false; reason: string };
+
+/** The point at which inspection stopped. `null` only when ok. */
+export type SvgFailureStage =
+  | 'empty'
+  | 'too-large'
+  | 'no-svg-found'
+  | 'parser-unavailable'
+  | 'not-well-formed'
+  | 'root-not-svg'
+  | 'disallowed-element'
+  | 'event-handler-attribute'
+  | 'namespaced-attribute'
+  | 'disallowed-attribute'
+  | 'unsafe-attribute-value'
+  | 'too-many-elements';
+
+/**
+ * Full diagnostic result of inspecting raw model output. `ok` mirrors
+ * validateAndSanitizeSvg; the rest is evidence for diagnosing WHY a given raw
+ * response did or didn't pass, without re-running anything.
+ */
+export interface SvgInspection {
+  /** True only when the markup passed every check; `svg` is then the safe output. */
+  ok: boolean;
+  /** Sanitized, re-serialized SVG when ok; '' otherwise. */
+  svg: string;
+  /** Where inspection stopped; null when ok. */
+  stage: SvgFailureStage | null;
+  /** Human-readable reason ('' when ok). */
+  reason: string;
+  /** Length of the RAW model output, verbatim (no trim). */
+  rawLength: number;
+  /** Length of the extracted <svg>…</svg> block (0 when none was found). */
+  extractedLength: number;
+  /** True when non-whitespace text preceded the extracted <svg>. */
+  hasPrefixNoise: boolean;
+  /** True when non-whitespace text followed the extracted </svg>. */
+  hasSuffixNoise: boolean;
+  /** Leading text before <svg> (trimmed + capped), '' when none. */
+  prefixText: string;
+  /** Trailing text after </svg> (trimmed + capped), '' when none. */
+  suffixText: string;
+  /** Offending element localName for element/attribute stages ('' otherwise). */
+  element: string;
+  /** Offending attribute name for attribute stages ('' otherwise). */
+  attribute: string;
+  /** Offending attribute value for the unsafe-value stage (capped), '' otherwise. */
+  value: string;
+}
 
 // The fixed canvas the model is told to draw on (see prompt.ts). A missing
 // viewBox is normalised to this rather than rejected.
@@ -22,12 +77,18 @@ const DEFAULT_VIEWBOX = '0 0 1000 600';
 /** Hard caps to keep a hostile/huge response from being expensive to handle. */
 const MAX_INPUT_CHARS = 100_000;
 const MAX_ELEMENTS = 4000;
+/** Cap on captured snippets (prefix/suffix/value) so diagnostics stay bounded. */
+const SNIPPET_CAP = 200;
 
 /**
  * The ONLY elements allowed in the generated art. Deliberately a small,
  * abstract-shape + gradient subset — enough for rich ambient art, nothing that
  * can script, load, embed, or style externally. `title`/`desc` are accessibility
  * metadata (plain text only) and harmless.
+ *
+ * NOTE the canonical SVG casing of `linearGradient`/`radialGradient`. Element
+ * names are matched case-INSENSITIVELY against `ALLOWED_ELEMENTS_LC` below, so a
+ * correctly-cased `<linearGradient>` is accepted rather than wrongly rejected.
  */
 const ALLOWED_ELEMENTS = new Set<string>([
   'svg',
@@ -46,6 +107,16 @@ const ALLOWED_ELEMENTS = new Set<string>([
   'radialGradient',
   'stop',
 ]);
+
+/**
+ * Lowercased view of ALLOWED_ELEMENTS, used for matching. The walker lowercases
+ * each element's localName, so comparing against a lowercased allowlist is what
+ * keeps mixed-case-but-valid SVG element names (linearGradient, radialGradient)
+ * from being rejected by a case mismatch.
+ */
+const ALLOWED_ELEMENTS_LC = new Set<string>(
+  [...ALLOWED_ELEMENTS].map((e) => e.toLowerCase()),
+);
 
 /**
  * The ONLY attributes allowed (matched case-insensitively). Geometry, transform,
@@ -111,6 +182,11 @@ const ALLOWED_ATTRS = new Set<string>([
   'xmlns',
 ]);
 
+/** Truncate a captured snippet so diagnostics never balloon. */
+function clip(s: string): string {
+  return s.length > SNIPPET_CAP ? s.slice(0, SNIPPET_CAP) + '…' : s;
+}
+
 /** Reject an attribute value that could smuggle in script or external refs. */
 function attrValueIsDangerous(value: string): boolean {
   const v = value.toLowerCase();
@@ -129,43 +205,93 @@ function attrValueIsDangerous(value: string): boolean {
   return false;
 }
 
-/** Extract the first complete <svg>…</svg> block from possibly-noisy output. */
-function extractSvg(raw: string): string | null {
+/**
+ * Locate the first complete <svg>…</svg> block in possibly-noisy output and
+ * report its bounds so the caller can see any leading/trailing text. Returns
+ * null when there is no usable block.
+ */
+function extractSvgBlock(
+  raw: string,
+): { svg: string; start: number; end: number } | null {
   const start = raw.search(/<svg[\s>]/i);
   if (start === -1) return null;
   const close = raw.toLowerCase().lastIndexOf('</svg>');
   if (close === -1 || close < start) return null;
-  return raw.slice(start, close + '</svg>'.length);
+  const end = close + '</svg>'.length;
+  return { svg: raw.slice(start, end), start, end };
 }
 
 /**
- * Validate + sanitize raw model output into safe SVG markup, or explain why it
- * can't be used. Strict: any disallowed element, attribute, or value fails the
- * whole document (no partial stripping that could hide an injected node). On
- * success the returned markup is re-serialized from the parsed, fully-checked
- * tree and normalised (xmlns, sizing, role/aria-hidden, viewBox).
+ * Detailed inspection of raw model output: the SAME strict checks as
+ * validateAndSanitizeSvg, but every exit reports the precise failure stage and
+ * supporting metadata (raw vs extracted length, prefix/suffix noise, offending
+ * element/attribute/value). On success `ok` is true and `svg` holds the
+ * sanitized, re-serialized markup.
  */
-export function validateAndSanitizeSvg(raw: string): SvgValidation {
-  const trimmed = (raw ?? '').trim();
-  if (!trimmed) return { ok: false, reason: 'model returned empty output' };
-  if (trimmed.length > MAX_INPUT_CHARS)
+export function inspectSvg(raw: string): SvgInspection {
+  const rawText = raw ?? '';
+  const base: SvgInspection = {
+    ok: false,
+    svg: '',
+    stage: null,
+    reason: '',
+    rawLength: rawText.length,
+    extractedLength: 0,
+    hasPrefixNoise: false,
+    hasSuffixNoise: false,
+    prefixText: '',
+    suffixText: '',
+    element: '',
+    attribute: '',
+    value: '',
+  };
+
+  if (!rawText.trim())
+    return { ...base, stage: 'empty', reason: 'model returned empty output' };
+  if (rawText.length > MAX_INPUT_CHARS)
     return {
-      ok: false,
-      reason: `output too large (${trimmed.length} chars > ${MAX_INPUT_CHARS} cap)`,
+      ...base,
+      stage: 'too-large',
+      reason: `output too large (${rawText.length} chars > ${MAX_INPUT_CHARS} cap)`,
     };
 
-  const candidate = extractSvg(trimmed);
-  if (!candidate)
-    return { ok: false, reason: 'no <svg> element found in model output' };
+  const block = extractSvgBlock(rawText);
+  if (!block)
+    return {
+      ...base,
+      stage: 'no-svg-found',
+      reason: 'no <svg> element found in model output',
+    };
+
+  // Bounds known: record how much of the raw output was the <svg> block and
+  // whether there was noise around it (a common Gemini-Nano failure mode).
+  const prefix = rawText.slice(0, block.start);
+  const suffix = rawText.slice(block.end);
+  const meta: SvgInspection = {
+    ...base,
+    extractedLength: block.svg.length,
+    hasPrefixNoise: prefix.trim().length > 0,
+    hasSuffixNoise: suffix.trim().length > 0,
+    prefixText: clip(prefix.trim()),
+    suffixText: clip(suffix.trim()),
+  };
 
   if (typeof DOMParser === 'undefined')
-    return { ok: false, reason: 'DOMParser unavailable in this environment' };
+    return {
+      ...meta,
+      stage: 'parser-unavailable',
+      reason: 'DOMParser unavailable in this environment',
+    };
 
   let doc: Document;
   try {
-    doc = new DOMParser().parseFromString(candidate, 'image/svg+xml');
+    doc = new DOMParser().parseFromString(block.svg, 'image/svg+xml');
   } catch (e) {
-    return { ok: false, reason: `SVG could not be parsed (${String(e)})` };
+    return {
+      ...meta,
+      stage: 'not-well-formed',
+      reason: `SVG could not be parsed (${String(e)})`,
+    };
   }
 
   // A namespaced <parsererror> anywhere means the XML was malformed.
@@ -173,12 +299,16 @@ export function validateAndSanitizeSvg(raw: string): SvgValidation {
     doc.documentElement.localName.toLowerCase() === 'parsererror' ||
     doc.querySelector('parsererror')
   ) {
-    return { ok: false, reason: 'SVG markup is not well-formed XML' };
+    return {
+      ...meta,
+      stage: 'not-well-formed',
+      reason: 'SVG markup is not well-formed XML',
+    };
   }
 
   const root = doc.documentElement;
   if (!root || root.localName.toLowerCase() !== 'svg') {
-    return { ok: false, reason: 'root element is not <svg>' };
+    return { ...meta, stage: 'root-not-svg', reason: 'root element is not <svg>' };
   }
 
   // Walk every element and enforce the allowlists.
@@ -189,35 +319,60 @@ export function validateAndSanitizeSvg(raw: string): SvgValidation {
     count++;
     if (count > MAX_ELEMENTS)
       return {
-        ok: false,
+        ...meta,
+        stage: 'too-many-elements',
         reason: `too many elements (> ${MAX_ELEMENTS})`,
       };
 
-    const name = node.localName.toLowerCase();
-    if (!ALLOWED_ELEMENTS.has(name)) {
-      return { ok: false, reason: `disallowed element <${name}>` };
+    const name = node.localName;
+    if (!ALLOWED_ELEMENTS_LC.has(name.toLowerCase())) {
+      return {
+        ...meta,
+        stage: 'disallowed-element',
+        element: name,
+        reason: `disallowed element <${name}>`,
+      };
     }
 
     for (const attrName of node.getAttributeNames()) {
       const lower = attrName.toLowerCase();
       if (lower.startsWith('on')) {
-        return { ok: false, reason: `event handler attribute "${attrName}"` };
+        return {
+          ...meta,
+          stage: 'event-handler-attribute',
+          element: name,
+          attribute: attrName,
+          reason: `event handler attribute "${attrName}"`,
+        };
       }
       // Reject any namespaced attribute (e.g. xlink:href) outright; we never
       // need them and they are a common injection vector.
       if (lower.includes(':')) {
-        return { ok: false, reason: `namespaced attribute "${attrName}"` };
+        return {
+          ...meta,
+          stage: 'namespaced-attribute',
+          element: name,
+          attribute: attrName,
+          reason: `namespaced attribute "${attrName}"`,
+        };
       }
       if (!ALLOWED_ATTRS.has(lower)) {
         return {
-          ok: false,
+          ...meta,
+          stage: 'disallowed-attribute',
+          element: name,
+          attribute: attrName,
           reason: `disallowed attribute "${attrName}" on <${name}>`,
         };
       }
       const value = node.getAttribute(attrName) ?? '';
       if (attrValueIsDangerous(value)) {
         return {
-          ok: false,
+          ...meta,
+          stage: 'unsafe-attribute-value',
+          element: name,
+          attribute: attrName,
+          value: clip(value),
           reason: `unsafe value for "${attrName}" on <${name}>`,
         };
       }
@@ -238,5 +393,23 @@ export function validateAndSanitizeSvg(raw: string): SvgValidation {
   root.setAttribute('aria-hidden', 'true');
 
   const svg = new XMLSerializer().serializeToString(root);
-  return { ok: true, svg };
+  return { ...meta, ok: true, svg, stage: null, reason: '' };
+}
+
+/**
+ * Validate + sanitize raw model output into safe SVG markup, or explain why it
+ * can't be used. Strict: any disallowed element, attribute, or value fails the
+ * whole document (no partial stripping that could hide an injected node). On
+ * success the returned markup is re-serialized from the parsed, fully-checked
+ * tree and normalised (xmlns, sizing, role/aria-hidden, viewBox).
+ *
+ * Thin wrapper over inspectSvg() for callers that only need the OK/REASON
+ * verdict; reach for inspectSvg() directly when you need the failure stage and
+ * supporting metadata.
+ */
+export function validateAndSanitizeSvg(raw: string): SvgValidation {
+  const result = inspectSvg(raw);
+  return result.ok
+    ? { ok: true, svg: result.svg }
+    : { ok: false, reason: result.reason };
 }
