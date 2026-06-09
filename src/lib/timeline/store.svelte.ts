@@ -285,6 +285,15 @@ const AI_MAX_NOTES = 40;
 const AI_MAX_CHARS = 4000;
 /** Don't bother summarizing fewer than this many characters of feed text. */
 const AI_MIN_CHARS = 80;
+/**
+ * Max times we re-prompt Gemini Nano for the SVG in a single generation when the
+ * output is a model-FORMATTING miss (code fences / prose around the markup, or
+ * no <svg> at all). This is NOT a fallback and never weakens the validator: each
+ * attempt's raw output is run through the same strict inspectSvg(). Genuine
+ * validation failures (disallowed/unsafe content) are non-retryable and stop at
+ * once. Counts the first try, so 3 = at most two re-prompts.
+ */
+const AI_SVG_MAX_ATTEMPTS = 3;
 
 export class TimelineStore {
   // ---- reactive state ----
@@ -1459,6 +1468,15 @@ export class TimelineStore {
    * model session exists, generation throws, or the markup fails validation, this
    * returns an empty SVG with a reason and the caller draws nothing. `valid` is
    * true only for markup that both came from the model AND passed validation.
+   *
+   * Retries (up to AI_SVG_MAX_ATTEMPTS) ONLY a model-FORMATTING miss — when the
+   * raw output is empty, has no <svg> block at all, or wraps the markup in prose
+   * / code fences — since a re-prompt can plausibly fix that. The retry decision
+   * comes straight from inspectSvg() (stage + prefix/suffix noise); it never
+   * weakens the validator. A genuine validation failure (disallowed element/
+   * attribute, unsafe value, malformed XML, too large/many) is NOT a formatting
+   * miss — re-prompting won't make it safe — so it stops immediately. The first
+   * successful, validated output stops the loop at once.
    */
   async #generateBackgroundSvg(
     summary: string,
@@ -1471,19 +1489,33 @@ export class TimelineStore {
         reason: 'Gemini Nano SVG generator is not available.',
       };
     }
-    let raw: string;
-    try {
-      raw = await promptSvg(this.#svgModel, summary, undefined, this.aiUserPrompt);
-    } catch (err) {
-      return {
-        svg: '',
-        valid: false,
-        rawChars: 0,
-        reason: 'SVG generation failed: ' + errMessage(err),
-      };
-    }
-    const result = inspectSvg(raw);
-    if (!result.ok) {
+
+    let lastReason = '';
+    let lastRawChars = 0;
+    for (let attempt = 1; attempt <= AI_SVG_MAX_ATTEMPTS; attempt++) {
+      let raw: string;
+      try {
+        raw = await promptSvg(this.#svgModel, summary, undefined, this.aiUserPrompt);
+      } catch (err) {
+        // A thrown prompt (aborted / model error) isn't a formatting miss we can
+        // re-prompt our way out of — stop without retrying.
+        return {
+          svg: '',
+          valid: false,
+          rawChars: 0,
+          reason:
+            'SVG generation failed: ' +
+            errMessage(err) +
+            (attempt > 1 ? ` (after ${attempt} attempts)` : ''),
+        };
+      }
+
+      const result = inspectSvg(raw);
+      if (result.ok) {
+        // Success — stop immediately.
+        return { svg: result.svg, valid: true, rawChars: raw.length, reason: '' };
+      }
+
       // Make the runtime reason precise: the failure stage plus, when the model
       // wrapped the <svg> in prose, how much of the raw output was actually the
       // SVG block and on which side the noise sat.
@@ -1494,14 +1526,31 @@ export class TimelineStore {
               .filter(Boolean)
               .join('+')} text around <svg>)`
           : '';
-      return {
-        svg: '',
-        valid: false,
-        rawChars: raw.length,
-        reason: `Generated SVG failed validation [${result.stage}]: ${result.reason}${noise}`,
-      };
+      lastReason = `Generated SVG failed validation [${result.stage}]: ${result.reason}${noise}`;
+      lastRawChars = raw.length;
+
+      // Classify straight from inspectSvg: a formatting miss (empty output, no
+      // <svg> at all, or prose/code fences around the markup) is worth a
+      // re-prompt; anything else is a real validation failure and stops now.
+      const retryable =
+        result.stage === 'empty' ||
+        result.stage === 'no-svg-found' ||
+        result.hasPrefixNoise ||
+        result.hasSuffixNoise;
+      if (!retryable) {
+        return { svg: '', valid: false, rawChars: raw.length, reason: lastReason };
+      }
+      // Retryable formatting miss: loop again if attempts remain.
     }
-    return { svg: result.svg, valid: true, rawChars: raw.length, reason: '' };
+
+    // Exhausted every attempt on retryable formatting misses — no fallback, so
+    // report the last failure and note how many tries it took.
+    return {
+      svg: '',
+      valid: false,
+      rawChars: lastRawChars,
+      reason: `${lastReason} (gave up after ${AI_SVG_MAX_ATTEMPTS} attempts)`,
+    };
   }
 
   /**

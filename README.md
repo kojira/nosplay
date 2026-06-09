@@ -177,7 +177,11 @@ the SVG markup directly** — there is **no fallback**. When enabled, nosplay:
    you can edit** — both are exposed as live, editable fields in the AI debug
    panel (and in the `svg-smoke.html` test), with the user prompt's `{summary}`
    placeholder filled in with the feed text; the output is still strictly
-   validated/sanitized with no fallback;
+   validated/sanitized with no fallback. A pure **model-formatting miss** (empty
+   output, no `<svg>` at all, or prose/code fences around the markup) is
+   re-prompted up to 3 times total — classified straight from the validator's
+   result — while a genuine validation failure (disallowed/unsafe content) stops
+   at once; the validator is never weakened and there is still no fallback;
 4. **strictly validates and sanitizes** that markup (`src/lib/ai/sanitize.ts`)
    before it touches the DOM. The validator parses the SVG and enforces a tight
    allowlist:

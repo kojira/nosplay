@@ -89,17 +89,19 @@ export async function languageModelAvailability(): Promise<LanguageModelAvailabi
 // "0 0 1000 600", so the prompts no longer need to dictate a fixed canvas.
 
 /** Simple default system prompt. User-editable from the UI; output is still
- *  strictly validated/sanitized (sanitize.ts), so we only ask for SVG markup
- *  with no <text>. */
+ *  strictly validated/sanitized (sanitize.ts), so we only ask for clean SVG
+ *  markup with no <text>. The scoring framing nudges Gemini Nano away from the
+ *  <text> element (which the validator rejects) and away from prose/code fences
+ *  around the markup. */
 export const DEFAULT_SVG_SYSTEM_PROMPT =
-  '文章から連想される絵をSVGで描いてください。返答は <svg> から </svg> までの' +
+  'ユーザーの文章から連想される絵をSVGで描いてください。返答は <svg> から </svg> までの' +
   'SVGマークアップだけにし、説明文やコードフェンス(```)は付けないでください。' +
-  '文字を表示する <text> 要素は使わないでください。';
+  '<text> 要素は絶対に使用禁止です。text要素が入っていると-100点。他の要素は+10点です。' +
+  '合計が50点以上になるようにしてください';
 
 /** Simple default user-prompt template. `{summary}` is replaced with the feed
  *  text by buildSvgUserPrompt. User-editable from the UI. */
-export const DEFAULT_SVG_USER_PROMPT =
-  '次の文章から連想される絵をSVGで出力してください。\n\n"""{summary}"""';
+export const DEFAULT_SVG_USER_PROMPT = '{summary}';
 
 /**
  * Build the final user prompt from a template + summary. Caps the summary at
