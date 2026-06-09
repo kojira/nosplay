@@ -5,10 +5,19 @@
   import type { Note } from '../nostr/types';
 
   const LANES = 6; // vertical lanes for the comment stack
-  // Fraction of the visible window a single note occupies horizontally. Used to
-  // keep a lane "busy" so the next note in that lane doesn't overlap it. Scales
-  // with windowMs so spacing stays sane at every zoom level.
-  const LANE_BUSY_FRACTION = 0.16;
+  // A note is right-anchored at its time and grows leftward up to this pixel
+  // width (mirrors the .note CSS: max-width min(340px, 60vw)). Two same-lane
+  // notes overlap when their horizontal gap is smaller than this, so we keep a
+  // lane "busy" for exactly the time span this width occupies at the current
+  // zoom. GAP_PX adds a little breathing room between adjacent notes.
+  const MAX_NOTE_PX = 340;
+  const NOTE_VW_FRACTION = 0.6;
+  const GAP_PX = 8;
+  // Fallback fraction used before the container width is measured.
+  const FALLBACK_BUSY_FRACTION = 0.16;
+
+  /** Measured timeline width (px); drives the busy-interval calculation. */
+  let containerW = $state(0);
 
   interface Placed {
     note: Note;
@@ -26,14 +35,22 @@
     const notes = timeline.visibleNotes;
     const playhead = timeline.playheadMs;
     const win = timeline.windowMs;
-    const busyMs = win * LANE_BUSY_FRACTION;
+    // How much of the window one note (plus gap) covers horizontally. Derived
+    // from the real container width so spacing matches the rendered box size
+    // instead of a hand-tuned guess; capped so it never exceeds the window.
+    const noteWidthPx = Math.min(MAX_NOTE_PX, containerW * NOTE_VW_FRACTION) + GAP_PX;
+    const busyFraction =
+      containerW > 0 ? Math.min(noteWidthPx / containerW, 1) : FALLBACK_BUSY_FRACTION;
+    const busyMs = win * busyFraction;
     const headId = timeline.headNote?.id ?? null;
     const laneFreeAt = new Array<number>(LANES).fill(-Infinity);
     const out: Placed[] = [];
     for (const note of notes) {
       const ms = note.created_at * 1000;
       const f = (playhead - ms) / win; // 0..1 from right edge
-      // pick the lane that has been free longest
+      // Prefer a lane that is genuinely free at this time; otherwise fall back
+      // to the lane that frees soonest (least overlap) so a note is never
+      // dropped even under bursty load.
       let lane = 0;
       let best = laneFreeAt[0];
       for (let i = 1; i < LANES; i++) {
@@ -67,7 +84,12 @@
   }
 </script>
 
-<div class="timeline" role="log" aria-label="Live timeline of notes">
+<div
+  class="timeline"
+  role="log"
+  aria-label="Live timeline of notes"
+  bind:clientWidth={containerW}
+>
   {#if placed.length === 0}
     <div class="empty">
       {#if timeline.status === 'connecting'}
