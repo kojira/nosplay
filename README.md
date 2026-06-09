@@ -17,7 +17,8 @@ no sample or fake posts.
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
   `datetime-local` jump to seek to any past moment within the loaded history.
 - **Text-to-speech** — optional read-aloud of new notes via the browser's
-  Web Speech API.
+  Web Speech API. URLs and Nostr identifiers (npub/note/etc.) are stripped or
+  replaced before speaking so they aren't read aloud.
 - **Posting** — compose and publish a note through a [NIP-07](https://github.com/nostr-protocol/nips/blob/master/07.md)
   browser extension (e.g. Alby, nos2x). The composer's *post-@* selector
   (current / playhead) only labels intent; posts always publish at the real
