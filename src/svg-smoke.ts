@@ -15,6 +15,9 @@ import {
   languageModelAvailability,
   createSvgModel,
   promptSvg,
+  DEFAULT_SVG_SYSTEM_PROMPT,
+  DEFAULT_SVG_USER_PROMPT,
+  buildSvgUserPrompt,
 } from './lib/ai/prompt';
 import { inspectSvg, type SvgInspection } from './lib/ai/sanitize';
 
@@ -25,6 +28,15 @@ const rawEl = document.querySelector<HTMLPreElement>('#raw')!;
 const validationEl = document.querySelector<HTMLDivElement>('#validation')!;
 const inspectionEl = document.querySelector<HTMLPreElement>('#inspection')!;
 const svgContainer = document.querySelector<HTMLDivElement>('#svgContainer')!;
+const systemPromptEl =
+  document.querySelector<HTMLTextAreaElement>('#systemPrompt')!;
+const userPromptEl = document.querySelector<HTMLTextAreaElement>('#userPrompt')!;
+const composedEl = document.querySelector<HTMLPreElement>('#composed')!;
+
+// Prefill the editable prompt fields with the current defaults so the prompts
+// in use are visible (and editable) from the start.
+systemPromptEl.value = DEFAULT_SVG_SYSTEM_PROMPT;
+userPromptEl.value = DEFAULT_SVG_USER_PROMPT;
 
 function setStatus(text: string): void {
   statusEl.textContent = text;
@@ -79,11 +91,21 @@ async function run(): Promise<void> {
       setStatus(
         `Downloading on-device model… ${Math.round(fraction * 100)}%`,
       );
-    });
+    }, systemPromptEl.value);
 
     try {
       setStatus('Model ready. Prompting Gemini Nano for SVG…');
-      const raw = await promptSvg(model, promptInput.value);
+      // Show exactly what is being sent (system + composed user prompt) so the
+      // prompts in use on this run are obvious on screen.
+      composedEl.textContent =
+        `--- system prompt ---\n${systemPromptEl.value}\n\n` +
+        `--- user prompt (sent) ---\n${buildSvgUserPrompt(userPromptEl.value, promptInput.value)}`;
+      const raw = await promptSvg(
+        model,
+        promptInput.value,
+        undefined,
+        userPromptEl.value,
+      );
 
       // Observation point #1: the RAW, untrusted model output, verbatim.
       rawEl.textContent = raw;

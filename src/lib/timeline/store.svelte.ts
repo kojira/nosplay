@@ -31,6 +31,8 @@ import {
   languageModelAvailability,
   createSvgModel,
   promptSvg,
+  DEFAULT_SVG_SYSTEM_PROMPT,
+  DEFAULT_SVG_USER_PROMPT,
   type LanguageModelInstance,
   type LanguageModelAvailability,
 } from '../ai/prompt';
@@ -335,6 +337,12 @@ export class TimelineStore {
    * to the console. Runtime-only; reset when the feature is turned off.
    */
   aiBgDebug = $state<AiBgDebug>(emptyAiBgDebug());
+  /** System prompt for the SVG model. Editable from the UI; applied on next
+   *  model start. Persisted across sessions. */
+  aiSystemPrompt = $state<string>(DEFAULT_SVG_SYSTEM_PROMPT);
+  /** User-prompt template for the SVG model ({summary} is replaced with the
+   *  feed text). Editable from the UI; applied live. Persisted across sessions. */
+  aiUserPrompt = $state<string>(DEFAULT_SVG_USER_PROMPT);
 
   // ---- auth (NIP-07) ----
   loginState = $state<LoginState>('logged-out');
@@ -722,6 +730,12 @@ export class TimelineStore {
       if (typeof saved.aiBgEnabled === 'boolean') {
         this.aiBgEnabled = saved.aiBgEnabled;
       }
+      if (typeof saved.aiSystemPrompt === 'string') {
+        this.aiSystemPrompt = saved.aiSystemPrompt;
+      }
+      if (typeof saved.aiUserPrompt === 'string') {
+        this.aiUserPrompt = saved.aiUserPrompt;
+      }
       // Playhead only restores when the last session was paused (not LIVE);
       // a live session reloads live, following wall-clock now. The actual
       // playhead is applied after history loads (see #applyPendingPlayhead),
@@ -824,6 +838,8 @@ export class TimelineStore {
       rememberLogin: this.#rememberLogin,
       mutedPubkeys: [...this.mutedPubkeys],
       aiBgEnabled: this.aiBgEnabled,
+      aiSystemPrompt: this.aiSystemPrompt,
+      aiUserPrompt: this.aiUserPrompt,
     };
   }
 
@@ -1355,7 +1371,7 @@ export class TimelineStore {
         if (runId !== this.#aiRunId) return;
         this.aiBgProgress = frac;
         this.aiBgStatus = frac >= 1 ? 'ready' : 'downloading';
-      });
+      }, this.aiSystemPrompt);
       if (runId !== this.#aiRunId) {
         // Toggled off during create(): discard the freshly made session.
         try {
@@ -1457,7 +1473,7 @@ export class TimelineStore {
     }
     let raw: string;
     try {
-      raw = await promptSvg(this.#svgModel, summary);
+      raw = await promptSvg(this.#svgModel, summary, undefined, this.aiUserPrompt);
     } catch (err) {
       return {
         svg: '',

@@ -66,9 +66,13 @@ This project was built to fulfill the [requirements document (要件書)](https:
   the notes. The model output is **strictly validated/sanitized** (a tight
   element/attribute allowlist; no script, event handlers, `<foreignObject>`,
   `<image>`/`<use>`, `<style>`, or external/`data:` references) before it is ever
-  put in the DOM. There is **no fallback**: if the Prompt API is unsupported, the
-  model is unavailable, generation fails, or the markup fails validation, **no
-  background is drawn** and the status line + debug panel say exactly why. The
+  put in the DOM. The system and user prompts are now simple defaults and are
+  **user-editable** (from the AI debug panel; the user prompt's `{summary}`
+  placeholder is replaced with the feed text), while the output stays strictly
+  validated with no fallback. There is **no fallback**: if the Prompt API is
+  unsupported, the model is unavailable, generation fails, or the markup fails
+  validation, **no background is drawn** and the status line + debug panel say
+  exactly why. The
   on-device **Summarizer API** is still used (when available) only to condense
   the feed text fed to the SVG prompt. Everything runs locally — no text leaves
   your device, and there are **no mock/fake AI responses**. It updates on a ~30s
@@ -169,7 +173,11 @@ the SVG markup directly** — there is **no fallback**. When enabled, nosplay:
    `src/lib/ai/prompt.ts`) to **generate the background SVG markup directly** —
    a single abstract, no-text `<svg>` matching the feed's mood. The model emits
    the actual SVG; nosplay does **not** assemble it from a template or a
-   structured scene;
+   structured scene. The system and user prompts are now **simple defaults that
+   you can edit** — both are exposed as live, editable fields in the AI debug
+   panel (and in the `svg-smoke.html` test), with the user prompt's `{summary}`
+   placeholder filled in with the feed text; the output is still strictly
+   validated/sanitized with no fallback;
 4. **strictly validates and sanitizes** that markup (`src/lib/ai/sanitize.ts`)
    before it touches the DOM. The validator parses the SVG and enforces a tight
    allowlist:

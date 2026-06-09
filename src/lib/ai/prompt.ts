@@ -85,29 +85,34 @@ export async function languageModelAvailability(): Promise<LanguageModelAvailabi
   }
 }
 
-// The art is generated against this fixed canvas so the strict validator and the
-// container styling agree on a known viewBox. The model is told to use it.
-const SVG_VIEW_W = 1000;
-const SVG_VIEW_H = 600;
+// The strict validator (sanitize.ts) normalises a missing viewBox to
+// "0 0 1000 600", so the prompts no longer need to dictate a fixed canvas.
 
-/** System prompt: defines the safe, abstract, no-text SVG the model must emit. */
-const SVG_SYSTEM_PROMPT =
-  'You are a generative-art engine. You turn a short text summary of a live ' +
-  'social feed into ONE self-contained, ABSTRACT background illustration, ' +
-  'returned as raw SVG markup and nothing else.\n' +
-  'HARD RULES — output is rejected if any are broken:\n' +
-  `- Output ONLY a single <svg ...>...</svg> element using viewBox "0 0 ${SVG_VIEW_W} ${SVG_VIEW_H}". No prose, no markdown fences, no explanation.\n` +
-  '- Allowed elements ONLY: svg, g, defs, title, desc, rect, circle, ellipse, ' +
-  'line, polyline, polygon, path, linearGradient, radialGradient, stop.\n' +
-  '- NO text/tspan, NO <image>, NO <use>, NO <style>, NO <script>, NO ' +
-  '<foreignObject>, NO <animate>/animation, NO filters.\n' +
-  '- NO event handlers (no on* attributes), NO href/xlink:href, NO external or ' +
-  'data: URLs. The only url(...) allowed is url(#localGradientId) for fills.\n' +
-  '- NO words, letters, names or labels from the summary anywhere in the art.\n' +
-  '- Keep it faint and ambient: low opacities (mostly 0.05–0.3), soft gradients, ' +
-  'flowing shapes. It sits BEHIND a timeline of notes, so it must stay subtle.\n' +
-  'Let the summary\'s overall mood guide palette and density: calmer/sparser ' +
-  'topics → fewer, softer shapes; busier topics → more.';
+/** Simple default system prompt. User-editable from the UI; output is still
+ *  strictly validated/sanitized (sanitize.ts), so we only ask for SVG markup
+ *  with no <text>. */
+export const DEFAULT_SVG_SYSTEM_PROMPT =
+  '文章から連想される絵をSVGで描いてください。返答は <svg> から </svg> までの' +
+  'SVGマークアップだけにし、説明文やコードフェンス(```)は付けないでください。' +
+  '文字を表示する <text> 要素は使わないでください。';
+
+/** Simple default user-prompt template. `{summary}` is replaced with the feed
+ *  text by buildSvgUserPrompt. User-editable from the UI. */
+export const DEFAULT_SVG_USER_PROMPT =
+  '次の文章から連想される絵をSVGで出力してください。\n\n"""{summary}"""';
+
+/**
+ * Build the final user prompt from a template + summary. Caps the summary at
+ * 1200 chars, substitutes the `{summary}` placeholder, and if the template has
+ * no placeholder appends the summary block so the model still receives it.
+ */
+export function buildSvgUserPrompt(template: string, summary: string): string {
+  const capped = summary.slice(0, 1200);
+  if (template.includes('{summary}')) {
+    return template.split('{summary}').join(capped);
+  }
+  return `${template}\n\n"""${capped}"""`;
+}
 
 /**
  * Create a Prompt API session primed to emit safe, abstract background SVG.
@@ -117,12 +122,13 @@ const SVG_SYSTEM_PROMPT =
  */
 export async function createSvgModel(
   onProgress?: (fraction: number) => void,
+  systemPrompt: string = DEFAULT_SVG_SYSTEM_PROMPT,
 ): Promise<LanguageModelInstance> {
   if (!isLanguageModelSupported() || !LanguageModel) {
     throw new Error('Built-in AI Prompt API (LanguageModel) is not supported.');
   }
   return LanguageModel.create({
-    initialPrompts: [{ role: 'system', content: SVG_SYSTEM_PROMPT }],
+    initialPrompts: [{ role: 'system', content: systemPrompt }],
     // The summarized feed is often Japanese, sometimes English; output is SVG.
     expectedInputs: [{ type: 'text', languages: ['ja', 'en'] }],
     expectedOutputs: [{ type: 'text', languages: ['en'] }],
@@ -136,26 +142,22 @@ export async function createSvgModel(
 }
 
 /**
- * Ask Gemini Nano for an abstract background SVG matching `summary`'s mood.
- * Returns the model's RAW text output VERBATIM (expected to be SVG markup; no
- * trimming or normalization, so callers/diagnostics see exactly what the model
- * emitted). The caller
- * MUST pass this through the strict validator/sanitizer before any DOM use —
- * this function performs no validation and never falls back. Throws on prompt
- * failure (aborted, model error, etc.).
+ * Ask Gemini Nano for a background SVG derived from `summary`. The user-prompt
+ * template (default DEFAULT_SVG_USER_PROMPT, overridable from the UI) is combined
+ * with the summary via buildSvgUserPrompt. Returns the model's RAW text output
+ * VERBATIM (expected to be SVG markup; no trimming or normalization, so
+ * callers/diagnostics see exactly what the model emitted). The caller MUST pass
+ * this through the strict validator/sanitizer before any DOM use — this function
+ * performs no validation and never falls back. Throws on prompt failure (aborted,
+ * model error, etc.).
  */
 export async function promptSvg(
   model: LanguageModelInstance,
   summary: string,
   signal?: AbortSignal,
+  userPromptTemplate: string = DEFAULT_SVG_USER_PROMPT,
 ): Promise<string> {
-  const input =
-    'Summary of what people are currently posting about:\n' +
-    `"""${summary.slice(0, 1200)}"""\n\n` +
-    'Generate the abstract background SVG for this mood now. Remember: a single ' +
-    `<svg> with viewBox "0 0 ${SVG_VIEW_W} ${SVG_VIEW_H}", only the allowed ` +
-    'shape/gradient elements, faint and ambient, absolutely no text. Reply with ' +
-    'the SVG markup only.';
+  const input = buildSvgUserPrompt(userPromptTemplate, summary);
   // Verbatim: no trim/normalization, so the validator and diagnostics see
   // exactly what the model emitted (including any leading/trailing prose
   // around the <svg> block).

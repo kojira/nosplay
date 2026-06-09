@@ -575,6 +575,19 @@
               Waiting for the first generation run…
             {/if}
           </div>
+          <!-- Live, editable view of the prompts in use. These bind directly to
+               timeline state, so edits take effect (user prompt live; system
+               prompt on next model start). -->
+          <div class="ai-prompt-editor">
+            <label>
+              <span>system prompt (applies on next model start)</span>
+              <textarea bind:value={timeline.aiSystemPrompt} rows="3"></textarea>
+            </label>
+            <label>
+              <span>user prompt ({'{summary}'} is replaced with the feed text)</span>
+              <textarea bind:value={timeline.aiUserPrompt} rows="3"></textarea>
+            </label>
+          </div>
           <dl class="ai-debug-meta">
             <div>
               <dt>Prompt API</dt>
@@ -1058,6 +1071,33 @@
   .ai-debug-summary.placeholder {
     color: var(--text-dim);
     font-style: italic;
+  }
+  .ai-prompt-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ai-prompt-editor label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .ai-prompt-editor span {
+    opacity: 0.65;
+    font-size: 0.85em;
+  }
+  .ai-prompt-editor textarea {
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    font-family: ui-monospace, monospace;
+    font-size: 0.8em;
+    line-height: 1.4;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
   }
   .ai-debug-meta {
     display: grid;

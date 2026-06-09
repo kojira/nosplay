@@ -26,6 +26,10 @@ export interface PlaybackState {
   mutedPubkeys: string[];
   /** Whether the AI (Gemini Nano) summary background is enabled. */
   aiBgEnabled: boolean;
+  /** User-editable system prompt for the SVG model (applied on next model start). */
+  aiSystemPrompt?: string;
+  /** User-editable user-prompt template for the SVG model ({summary} placeholder). */
+  aiUserPrompt?: string;
 }
 
 let dbp: Promise<IDBPDatabase> | null = null;
