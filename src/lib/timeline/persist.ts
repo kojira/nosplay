@@ -52,12 +52,24 @@ export async function loadPlayback(): Promise<Partial<PlaybackState> | null> {
   }
 }
 
+/**
+ * Strip any non-cloneable wrappers (e.g. Svelte $state proxies) so the value
+ * is safe for structuredClone / IndexedDB. A JSON round-trip yields plain
+ * objects, arrays, and primitives — which is exactly the shape PlaybackState is.
+ */
+function toPlain(state: PlaybackState): PlaybackState {
+  return JSON.parse(JSON.stringify(state)) as PlaybackState;
+}
+
 /** Persist the given playback state. Best-effort; swallows errors. */
 export async function savePlayback(state: PlaybackState): Promise<void> {
   try {
     const d = await db();
-    await d.put(STORE, state, KEY);
-  } catch {
+    // Serialize to plain data first: collections like manualRelays may be
+    // Svelte state proxies, which IndexedDB cannot structuredClone.
+    await d.put(STORE, toPlain(state), KEY);
+  } catch (err) {
     // best effort — settings persistence is non-essential
+    if (import.meta.env?.DEV) console.warn('[persist] savePlayback failed', err);
   }
 }
