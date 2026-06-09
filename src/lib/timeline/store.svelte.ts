@@ -41,6 +41,8 @@ export class TimelineStore {
   mode = $state<Mode>('limited');
   canPost = $state<boolean>(false);
   ttsEnabled = $state<boolean>(false);
+  /** Id of the note currently being read aloud by TTS, or null. */
+  speakingId = $state<string | null>(null);
   earliestMs = $state<number>(Date.now());
   names = $state<Map<string, ProfileMeta>>(new Map());
   error = $state<string | null>(null);
@@ -532,8 +534,29 @@ export class TimelineStore {
     if (!head) return;
     if (head.id === this.#lastSpokenId) return;
     // Only speak notes at/behind the live-ish playhead (avoid speaking far-past on seek).
-    this.#lastSpokenId = head.id;
-    speak(head.content);
+    const id = head.id;
+    this.#lastSpokenId = id;
+    speak(head.content, {
+      onStart: () => {
+        this.speakingId = id;
+      },
+      // Guard the clear so a stale callback for an old note doesn't wipe a newer one.
+      onEnd: () => {
+        if (this.speakingId === id) this.speakingId = null;
+      },
+      onError: () => {
+        if (this.speakingId === id) this.speakingId = null;
+      },
+    });
+  }
+
+  /**
+   * Cancel speech and clear the speaking indicator. `speechSynthesis.cancel()`
+   * does not reliably fire `onend`, so we clear `speakingId` ourselves.
+   */
+  #stopSpeech(): void {
+    cancelSpeech();
+    this.speakingId = null;
   }
 
   // ============================================================
@@ -594,7 +617,7 @@ export class TimelineStore {
   /** Shift the playhead by deltaMs (e.g. -60000 / +60000). Turns LIVE off; clamps. */
   nudge(deltaMs: number): void {
     this.isLive = false;
-    cancelSpeech();
+    this.#stopSpeech();
     const now = Date.now();
     const next = this.playheadMs + deltaMs;
     this.playheadMs = clamp(next, this.earliestMs, now);
@@ -616,7 +639,7 @@ export class TimelineStore {
   seekTo(ms: number): void {
     const now = Date.now();
     this.isLive = false;
-    cancelSpeech();
+    this.#stopSpeech();
     this.playheadMs = clamp(ms, this.earliestMs, now);
     if (this.playheadMs >= now) {
       this.isLive = true;
@@ -626,7 +649,7 @@ export class TimelineStore {
 
   toggleTts(): void {
     this.ttsEnabled = !this.ttsEnabled;
-    if (!this.ttsEnabled) cancelSpeech();
+    if (!this.ttsEnabled) this.#stopSpeech();
     else this.#lastSpokenId = this.headNote?.id ?? null;
   }
 
@@ -646,7 +669,7 @@ export class TimelineStore {
   // ============================================================
   disconnect(): void {
     this.stop();
-    cancelSpeech();
+    this.#stopSpeech();
     // Flush a final save, then tear down the persistence effect.
     if (this.#saveTimer !== null) {
       clearTimeout(this.#saveTimer);

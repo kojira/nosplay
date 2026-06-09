@@ -25,6 +25,7 @@
     f: number;
     lane: number;
     isHead: boolean;
+    isSpeaking: boolean;
   }
 
   // Assign lanes greedily over the time-ordered visible notes so labels do not
@@ -43,6 +44,7 @@
       containerW > 0 ? Math.min(noteWidthPx / containerW, 1) : FALLBACK_BUSY_FRACTION;
     const busyMs = win * busyFraction;
     const headId = timeline.headNote?.id ?? null;
+    const speakingId = timeline.speakingId;
     const laneFreeAt = new Array<number>(LANES).fill(-Infinity);
     const out: Placed[] = [];
     for (const note of notes) {
@@ -60,7 +62,13 @@
         }
       }
       laneFreeAt[lane] = ms + busyMs;
-      out.push({ note, f, lane, isHead: note.id === headId });
+      out.push({
+        note,
+        f,
+        lane,
+        isHead: note.id === headId,
+        isSpeaking: note.id === speakingId,
+      });
     }
     return out;
   });
@@ -104,9 +112,13 @@
     <div
       class="note"
       class:head={p.isHead}
+      class:speaking={p.isSpeaking}
       style="right: {p.f * 100}%; top: {(p.lane / LANES) * 100}%;"
     >
       <div class="head-row">
+        {#if p.isSpeaking}
+          <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
+        {/if}
         <span class="avatar" aria-hidden="true">
           <span class="avatar-fallback">{initial(p.note)}</span>
           {#if meta(p.note)?.picture}
@@ -234,6 +246,38 @@
     border-color: var(--accent-border);
     box-shadow: 0 0 0 1px var(--accent-border);
     z-index: 5;
+  }
+
+  /* The note currently being read aloud by TTS. Uses `outline` (not box-shadow)
+     so it layers cleanly on top of .note.head's box-shadow when both apply. */
+  .note.speaking {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
+    animation: ttsPulse 1.1s ease-in-out infinite;
+    z-index: 6;
+  }
+
+  @keyframes ttsPulse {
+    0%,
+    100% {
+      outline-color: var(--accent-border);
+    }
+    50% {
+      outline-color: transparent;
+    }
+  }
+
+  .speaking-badge {
+    flex: 0 0 auto;
+    font-size: 12px;
+    line-height: 1;
+    opacity: 0.9;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .note.speaking {
+      animation: none;
+    }
   }
 
   .playhead-line {

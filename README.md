@@ -23,7 +23,8 @@ no sample or fake posts.
   the utterance language defaults to `ja-JP`) so CJK text is read naturally
   rather than spelled out by a default English voice. URLs and Nostr identifiers
   (npub/note/etc.) are stripped or replaced before speaking so they aren't read
-  aloud.
+  aloud. The note currently being read aloud is highlighted in the timeline (a
+  pulsing outline plus a 🔊 badge) so you can see which post is speaking.
 - **Explicit NIP-07 login** — an account bar shows the login state (logged
   out / logging in / logged in / login error), the obtained pubkey (as a short
   npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login

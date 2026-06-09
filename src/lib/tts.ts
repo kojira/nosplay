@@ -71,8 +71,17 @@ function primeVoices(): void {
   }
 }
 
-/** Speak the given text if TTS is available. No-op otherwise. */
-export function speak(text: string): void {
+/**
+ * Speak the given text if TTS is available. No-op otherwise.
+ *
+ * Optional lifecycle callbacks let callers track speaking state. Note that
+ * `speechSynthesis.cancel()` does not reliably fire `onend` across browsers,
+ * so callers must also clear their state on explicit cancel.
+ */
+export function speak(
+  text: string,
+  callbacks?: { onStart?: () => void; onEnd?: () => void; onError?: () => void },
+): void {
   if (!hasTts()) return;
   const cleaned = sanitizeForSpeech(text);
   if (!cleaned) return;
@@ -87,6 +96,9 @@ export function speak(text: string): void {
       utter.voice = cachedJaVoice;
       utter.lang = cachedJaVoice.lang;
     }
+    utter.onstart = () => callbacks?.onStart?.();
+    utter.onend = () => callbacks?.onEnd?.();
+    utter.onerror = () => callbacks?.onError?.();
     window.speechSynthesis.speak(utter);
   } catch {
     // ignore speech failures
