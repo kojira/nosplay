@@ -1,26 +1,22 @@
 // Thin wrapper around Chrome's built-in AI **Prompt API** (`LanguageModel`,
-// Gemini Nano, on-device). This is an OPTIONAL enhancement path for the AI
-// background: when available, we ask the model for a small, STRUCTURED JSON
-// scene description (palette + shape counts) that drives the *local* SVG
-// assembly. It is NOT the production base — the Summarizer API remains that
-// (see summarizer.ts) — and everything here degrades to the deterministic
-// summary→SVG generator when the Prompt API is absent or fails.
+// Gemini Nano, on-device). This is the SOLE generator of the AI background:
+// nosplay asks Gemini Nano to produce the **SVG markup directly**, then strictly
+// validates/sanitizes that markup (see sanitize.ts) before it is shown. There is
+// **no fallback** — if the Prompt API is unsupported, the model is unavailable,
+// generation fails, or the returned markup fails validation, no background is
+// drawn and the UI/debug state says exactly why.
 //
 // References:
 //  - Prompt API explainer: https://developer.chrome.com/docs/ai/prompt-api
-//  - Structured output via `responseConstraint` (a JSON Schema): the model is
-//    constrained to emit JSON matching the schema, so the result is parseable.
 //
 // Honesty / constraints (see README):
-//  - The Prompt API is LESS widely available than the Summarizer: parts of it
-//    are behind flags / origin trials and the surface changes between Chrome
-//    versions. We feature-detect cleanly and only ever use it as a bonus —
-//    never assume universal support.
-//  - We never force a model download here; the caller only creates a session
-//    when availability is already 'available'.
-//  - The model only ever returns a palette key + numbers. Colors and final SVG
-//    markup are produced locally (svg.ts), so untrusted text never reaches the
-//    DOM.
+//  - The Prompt API is behind flags / origin trials in some Chrome versions and
+//    its surface changes between releases. We feature-detect cleanly and never
+//    assume universal support.
+//  - The model output is untrusted text. It is ALWAYS run through the strict
+//    SVG validator/sanitizer (sanitize.ts) before any DOM insertion; markup that
+//    contains script, event handlers, foreignObject, external/data refs, etc. is
+//    rejected outright (no background shown).
 
 /** Model/feature availability, mirrors the spec's AvailabilityStatus. */
 export type LanguageModelAvailability =
@@ -71,51 +67,6 @@ declare global {
   var LanguageModel: LanguageModelFactory | undefined;
 }
 
-/** Palette keys the model may choose from. Colors are resolved locally (svg.ts). */
-export const SCENE_PALETTE_KEYS = [
-  'aurora',
-  'ember',
-  'ocean',
-  'violet',
-  'mono',
-] as const;
-
-export type ScenePalette = (typeof SCENE_PALETTE_KEYS)[number];
-
-/**
- * The structured, abstract, no-text scene the model returns. Deliberately
- * modest and browser-safe: a named palette plus a handful of small integer
- * knobs that the local generator turns into shapes. No colors, no free text.
- */
-export interface BackgroundScene {
-  palette: ScenePalette;
-  /** Random seed (0..9999) so the same mood can still vary. */
-  seed: number;
-  /** Count of soft gradient blobs (0..6). */
-  blobs: number;
-  /** Count of orbital rings (0..5). */
-  rings: number;
-  /** Count of flowing ribbons (0..4). */
-  ribbons: number;
-  /** Star-field density 0..100 (mapped to a dot count locally). */
-  starDensity: number;
-}
-
-/** JSON Schema passed as `responseConstraint` so output is constrained JSON. */
-const SCENE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['palette', 'seed', 'blobs', 'rings', 'ribbons', 'starDensity'],
-  properties: {
-    palette: { type: 'string', enum: [...SCENE_PALETTE_KEYS] },
-    seed: { type: 'integer', minimum: 0, maximum: 9999 },
-    blobs: { type: 'integer', minimum: 0, maximum: 6 },
-    rings: { type: 'integer', minimum: 0, maximum: 5 },
-    ribbons: { type: 'integer', minimum: 0, maximum: 4 },
-    starDensity: { type: 'integer', minimum: 0, maximum: 100 },
-  },
-} as const;
-
 /** True when this browser exposes the built-in AI Prompt API at all. */
 export function isLanguageModelSupported(): boolean {
   return typeof LanguageModel !== 'undefined' && LanguageModel !== null;
@@ -123,8 +74,7 @@ export function isLanguageModelSupported(): boolean {
 
 /**
  * Query whether the on-device model is ready, needs downloading, or is
- * unavailable. Returns 'unavailable' on any error or when unsupported, so
- * callers can treat that as "no enhancement".
+ * unavailable. Returns 'unavailable' on any error or when unsupported.
  */
 export async function languageModelAvailability(): Promise<LanguageModelAvailability> {
   if (!isLanguageModelSupported() || !LanguageModel) return 'unavailable';
@@ -135,103 +85,74 @@ export async function languageModelAvailability(): Promise<LanguageModelAvailabi
   }
 }
 
+// The art is generated against this fixed canvas so the strict validator and the
+// container styling agree on a known viewBox. The model is told to use it.
+const SVG_VIEW_W = 1000;
+const SVG_VIEW_H = 600;
+
+/** System prompt: defines the safe, abstract, no-text SVG the model must emit. */
+const SVG_SYSTEM_PROMPT =
+  'You are a generative-art engine. You turn a short text summary of a live ' +
+  'social feed into ONE self-contained, ABSTRACT background illustration, ' +
+  'returned as raw SVG markup and nothing else.\n' +
+  'HARD RULES — output is rejected if any are broken:\n' +
+  `- Output ONLY a single <svg ...>...</svg> element using viewBox "0 0 ${SVG_VIEW_W} ${SVG_VIEW_H}". No prose, no markdown fences, no explanation.\n` +
+  '- Allowed elements ONLY: svg, g, defs, title, desc, rect, circle, ellipse, ' +
+  'line, polyline, polygon, path, linearGradient, radialGradient, stop.\n' +
+  '- NO text/tspan, NO <image>, NO <use>, NO <style>, NO <script>, NO ' +
+  '<foreignObject>, NO <animate>/animation, NO filters.\n' +
+  '- NO event handlers (no on* attributes), NO href/xlink:href, NO external or ' +
+  'data: URLs. The only url(...) allowed is url(#localGradientId) for fills.\n' +
+  '- NO words, letters, names or labels from the summary anywhere in the art.\n' +
+  '- Keep it faint and ambient: low opacities (mostly 0.05–0.3), soft gradients, ' +
+  'flowing shapes. It sits BEHIND a timeline of notes, so it must stay subtle.\n' +
+  'Let the summary\'s overall mood guide palette and density: calmer/sparser ' +
+  'topics → fewer, softer shapes; busier topics → more.';
+
 /**
- * Create a Prompt API session primed to emit abstract scene JSON. The feed is
- * mixed Japanese + English, so we declare both as expected input languages.
- * Throws if unsupported or if create() fails; the caller treats either as
- * "stay on the deterministic path".
+ * Create a Prompt API session primed to emit safe, abstract background SVG.
+ * MUST be called from a user gesture when the model still needs downloading
+ * (the spec requires transient activation for the download). `onProgress`
+ * receives 0..1 download progress. Throws if unsupported or if create() fails.
  */
-export async function createSceneModel(): Promise<LanguageModelInstance> {
+export async function createSvgModel(
+  onProgress?: (fraction: number) => void,
+): Promise<LanguageModelInstance> {
   if (!isLanguageModelSupported() || !LanguageModel) {
     throw new Error('Built-in AI Prompt API (LanguageModel) is not supported.');
   }
   return LanguageModel.create({
-    initialPrompts: [
-      {
-        role: 'system',
-        content:
-          'You turn a short text summary of a live social feed into an ' +
-          'ABSTRACT, no-text background scene. You never echo, describe, or ' +
-          'include any words, letters, names or labels from the summary — only ' +
-          'an aesthetic palette and simple shape counts. Reply ONLY with JSON ' +
-          'matching the provided schema.',
-      },
-    ],
-    // The summarized feed is often Japanese, sometimes English.
+    initialPrompts: [{ role: 'system', content: SVG_SYSTEM_PROMPT }],
+    // The summarized feed is often Japanese, sometimes English; output is SVG.
     expectedInputs: [{ type: 'text', languages: ['ja', 'en'] }],
     expectedOutputs: [{ type: 'text', languages: ['en'] }],
+    monitor: (m: EventTarget) => {
+      m.addEventListener('downloadprogress', (e: Event) => {
+        const frac = (e as ProgressEvent).loaded;
+        if (onProgress && typeof frac === 'number') onProgress(frac);
+      });
+    },
   });
 }
 
 /**
- * Ask the model for a structured scene matching `summary`'s mood. Returns a
- * validated BackgroundScene, or null on any failure (prompt error, non-JSON
- * output, etc.) so the caller falls back to the deterministic generator.
- * Numeric ranges are clamped again at render time (svg.ts) as defence in depth.
+ * Ask Gemini Nano for an abstract background SVG matching `summary`'s mood.
+ * Returns the model's RAW text output (expected to be SVG markup). The caller
+ * MUST pass this through the strict validator/sanitizer before any DOM use —
+ * this function performs no validation and never falls back. Throws on prompt
+ * failure (aborted, model error, etc.).
  */
-export async function promptScene(
+export async function promptSvg(
   model: LanguageModelInstance,
   summary: string,
   signal?: AbortSignal,
-): Promise<BackgroundScene | null> {
+): Promise<string> {
   const input =
     'Summary of what people are currently posting about:\n' +
     `"""${summary.slice(0, 1200)}"""\n\n` +
-    'Choose an abstract background scene matching its overall mood. Pick a ' +
-    'palette, a random seed, and how many soft blobs, orbital rings and ' +
-    'flowing ribbons to draw, plus a star-field density (0-100). Calmer or ' +
-    'sparser topics → fewer, softer shapes; busier topics → more.';
-  try {
-    const raw = await model.prompt(input, {
-      responseConstraint: SCENE_SCHEMA,
-      signal,
-    });
-    return parseScene(raw);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Parse + validate the model's reply into a BackgroundScene. Tolerates output
- * that wraps the JSON in prose/markdown fences (some builds ignore the
- * constraint). Returns null if no usable object is found.
- */
-function parseScene(raw: string): BackgroundScene | null {
-  let data: unknown = tryParse(raw);
-  if (data === undefined) {
-    // Fall back to extracting the first {...} block.
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) return null;
-    data = tryParse(match[0]);
-    if (data === undefined) return null;
-  }
-  if (!data || typeof data !== 'object') return null;
-  const o = data as Record<string, unknown>;
-
-  const palette = (SCENE_PALETTE_KEYS as readonly string[]).includes(
-    o.palette as string,
-  )
-    ? (o.palette as ScenePalette)
-    : 'violet';
-  const num = (v: unknown, fallback: number): number =>
-    typeof v === 'number' && Number.isFinite(v) ? v : fallback;
-
-  return {
-    palette,
-    seed: num(o.seed, 0),
-    blobs: num(o.blobs, 3),
-    rings: num(o.rings, 3),
-    ribbons: num(o.ribbons, 2),
-    starDensity: num(o.starDensity, 50),
-  };
-}
-
-/** JSON.parse that returns undefined instead of throwing. */
-function tryParse(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return undefined;
-  }
+    'Generate the abstract background SVG for this mood now. Remember: a single ' +
+    `<svg> with viewBox "0 0 ${SVG_VIEW_W} ${SVG_VIEW_H}", only the allowed ` +
+    'shape/gradient elements, faint and ambient, absolutely no text. Reply with ' +
+    'the SVG markup only.';
+  return (await model.prompt(input, { signal })).trim();
 }

@@ -25,30 +25,34 @@ import {
   createSummarizer,
   type SummarizerInstance,
 } from '../ai/summarizer';
-import { generateBackgroundSvg, sceneToBackgroundSvg } from '../ai/svg';
+import { validateAndSanitizeSvg } from '../ai/sanitize';
 import {
   isLanguageModelSupported,
   languageModelAvailability,
-  createSceneModel,
-  promptScene,
+  createSvgModel,
+  promptSvg,
   type LanguageModelInstance,
-  type BackgroundScene,
+  type LanguageModelAvailability,
 } from '../ai/prompt';
 
 export type Status = 'idle' | 'connecting' | 'live' | 'limited' | 'error';
 export type Mode = 'follows' | 'limited';
 
 /**
- * Lifecycle/availability of the AI summary background. Surfaced in the UI so the
- * user always knows why the feature is or isn't drawing anything:
+ * Lifecycle/availability of the AI summary background. The background is drawn
+ * ONLY from SVG that Gemini Nano (the Prompt API / LanguageModel) generates
+ * directly — there is no fallback — so the status reflects that generator:
  *  - 'off'           the feature is disabled
- *  - 'unsupported'   this browser has no built-in AI Summarizer API
- *  - 'unavailable'   API present but the model can't run (e.g. no capacity)
+ *  - 'unsupported'   this browser has no built-in AI Prompt API (LanguageModel)
+ *  - 'unavailable'   API present but the on-device model can't run
  *  - 'downloadable'  enabling will trigger a model download (needs a click)
  *  - 'downloading'   the on-device model is being fetched (progress %)
- *  - 'ready'         summarizer live, waiting for / between summaries
- *  - 'summarizing'   a summary is being generated right now
- *  - 'error'         creating/summarizing failed
+ *  - 'ready'         model live, waiting for / between generations
+ *  - 'summarizing'   condensing the visible feed text for the SVG prompt
+ *  - 'generating'    Gemini Nano is generating the background SVG right now
+ *  - 'summary-empty' nothing meaningful to draw from the visible feed
+ *  - 'invalid-svg'   the model returned markup that failed strict validation
+ *  - 'error'         creating the model or generating the SVG failed
  */
 export type AiBgStatus =
   | 'off'
@@ -58,11 +62,13 @@ export type AiBgStatus =
   | 'downloading'
   | 'ready'
   | 'summarizing'
+  | 'generating'
   | 'summary-empty'
+  | 'invalid-svg'
   | 'error';
 
-/** How the last background SVG was produced. */
-export type AiRenderMode = 'scene' | 'deterministic' | 'none';
+/** How the last background was produced. Direct Gemini-Nano SVG, or nothing. */
+export type AiRenderMode = 'direct-svg' | 'none';
 
 /**
  * Debug snapshot of the LAST summarization run, surfaced in the UI and logged to
@@ -91,14 +97,26 @@ export interface AiBgDebug {
   inputTruncated: boolean;
   /** Characters of the resulting summary text. */
   summaryChars: number;
-  /** Characters of the rendered SVG markup. */
+  /** Characters of the validated SVG actually shown (0 when none). */
   svgChars: number;
-  /** Whether the SVG came from a Prompt-API scene or the deterministic path. */
+  /** Characters of the RAW model output before validation (0 when none). */
+  rawSvgChars: number;
+  /** How the last background was produced: direct Gemini-Nano SVG, or none. */
   renderMode: AiRenderMode;
-  /** The last scene the Prompt API returned, or null on the deterministic path. */
-  scene: BackgroundScene | null;
-  /** Whether the optional Prompt-API scene model is live this session. */
-  sceneModelReady: boolean;
+
+  // ---- Gemini Nano direct-SVG generator (the Prompt API / LanguageModel) ----
+  /** Whether this browser exposes the Prompt API (LanguageModel) at all. */
+  promptApiSupported: boolean;
+  /** Last known on-device model availability ('unsupported'/'unknown' before checked). */
+  promptApiAvailability: LanguageModelAvailability | 'unsupported' | 'unknown';
+  /** Whether the direct-SVG generator session is live this session. */
+  svgModelReady: boolean;
+  /** True when the last shown background came from Gemini-Nano direct SVG. */
+  directSvgUsed: boolean;
+  /** Whether the last generated SVG passed strict validation/sanitization. */
+  svgValid: boolean;
+  /** Human-readable reason for the last failure ('' when none). */
+  failureReason: string;
   /** True when there was too little text to summarize on the last run. */
   notEnoughText: boolean;
   /** Extra characters of feed text needed to clear AI_MIN_CHARS (0 when met). */
@@ -165,7 +183,9 @@ export function aiBgVerdict(
   svg: string,
   enabled: boolean,
 ): AiBgVerdict {
-  const svgGenerated = svg.length > 0 && debug.svgChars > 0;
+  // A non-empty, validated SVG that Gemini Nano generated directly.
+  const svgGenerated =
+    svg.length > 0 && debug.svgChars > 0 && debug.svgValid && debug.directSvgUsed;
   const domInserted = debug.domInserted;
   const layered =
     debug.domWidth > 0 && debug.domHeight > 0 && debug.opacity > 0;
@@ -174,11 +194,14 @@ export function aiBgVerdict(
   const reasons: string[] = [];
   if (!enabled) reasons.push('feature toggled off');
   if (!svgGenerated) {
-    if (debug.notEnoughText)
+    if (!debug.promptApiSupported)
+      reasons.push('Prompt API (LanguageModel) not supported in this browser');
+    else if (debug.promptApiAvailability === 'unavailable')
+      reasons.push('on-device Gemini Nano model unavailable');
+    else if (debug.notEnoughText)
       reasons.push(`not enough text (need ~${debug.charsNeeded} more chars)`);
-    else if (debug.renderMode === 'none' && debug.lastRunAt > 0)
-      reasons.push('summary came back empty');
-    else if (debug.lastRunAt === 0) reasons.push('no summarization run yet');
+    else if (debug.failureReason) reasons.push(debug.failureReason);
+    else if (debug.lastRunAt === 0) reasons.push('no generation run yet');
     else reasons.push('no SVG produced');
   } else {
     if (!domInserted)
@@ -190,6 +213,12 @@ export function aiBgVerdict(
     }
   }
   return { svgGenerated, domInserted, layered, visible, reasons };
+}
+
+/** Best-effort human-readable message from a thrown value. */
+function errMessage(err: unknown): string {
+  if (err instanceof Error) return err.message || err.name;
+  return String(err);
 }
 
 /** A fresh, empty debug snapshot (feature off / never run). */
@@ -207,9 +236,14 @@ function emptyAiBgDebug(): AiBgDebug {
     inputTruncated: false,
     summaryChars: 0,
     svgChars: 0,
+    rawSvgChars: 0,
     renderMode: 'none',
-    scene: null,
-    sceneModelReady: false,
+    promptApiSupported: false,
+    promptApiAvailability: 'unknown',
+    svgModelReady: false,
+    directSvgUsed: false,
+    svgValid: false,
+    failureReason: '',
     notEnoughText: false,
     charsNeeded: 0,
     domInserted: false,
@@ -417,16 +451,19 @@ export class TimelineStore {
   #profileTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ---- AI summary background (non-reactive) ----
-  /** Active Summarizer session (Gemini Nano), or null when not running. */
+  /**
+   * Optional Summarizer session (Gemini Nano), used to condense the visible feed
+   * text before it is handed to the SVG generator. Best-effort: when null we
+   * send the trimmed feed text directly. Never the background generator itself.
+   */
   #summarizer: SummarizerInstance | null = null;
   /**
-   * Optional Prompt API (LanguageModel / Gemini Nano) session used to generate
-   * a STRUCTURED scene for the background, or null when the Prompt API is
-   * unavailable. Pure enhancement over the Summarizer base: when present we ask
-   * it for a scene and render that; on any failure we fall back to the
-   * deterministic summary→SVG generator.
+   * The Prompt API (LanguageModel / Gemini Nano) session that generates the
+   * background SVG markup DIRECTLY, or null when unavailable. This is the only
+   * source of the background — there is no fallback. When it is null, or when
+   * its output fails strict validation, no background is shown.
    */
-  #langModel: LanguageModelInstance | null = null;
+  #svgModel: LanguageModelInstance | null = null;
   /** Heartbeat interval handle for periodic re-summarization. */
   #aiTimer: ReturnType<typeof setInterval> | null = null;
   /** Disposes the $effect that reacts to context changes. */
@@ -1263,23 +1300,50 @@ export class TimelineStore {
   }
 
   /**
-   * Bring the summarizer online and start the heartbeat + context-change effect.
-   * Feature-detects first and never throws to the caller; every failure mode
-   * lands in aiBgStatus. Leaves aiBgEnabled untouched (that is the user choice).
+   * Bring the Gemini-Nano SVG generator (Prompt API / LanguageModel) online and
+   * start the heartbeat + context-change effect. This generator is the ONLY
+   * source of the background — there is no fallback — so we gate on it directly:
+   * if the Prompt API is unsupported or the model is unavailable, we surface that
+   * and draw nothing. The Summarizer is brought up separately, best-effort, only
+   * to condense the prompt input. Never throws to the caller; every failure mode
+   * lands in aiBgStatus + aiBgDebug.failureReason. Leaves aiBgEnabled untouched.
    */
   async #startAiBackground(): Promise<void> {
     const runId = ++this.#aiRunId;
     this.#teardownAiSession(); // drop any previous session first
 
-    if (!isSummarizerSupported()) {
+    const supported = isLanguageModelSupported();
+    this.aiBgDebug = {
+      ...this.aiBgDebug,
+      promptApiSupported: supported,
+      promptApiAvailability: supported ? 'unknown' : 'unsupported',
+      svgModelReady: false,
+      directSvgUsed: false,
+      svgValid: false,
+      failureReason: '',
+    };
+    if (!supported) {
       this.aiBgStatus = 'unsupported';
+      this.aiBgDebug = {
+        ...this.aiBgDebug,
+        failureReason:
+          'Chrome built-in AI Prompt API (LanguageModel) is not available in ' +
+          'this browser, so no AI background can be generated.',
+      };
       return;
     }
 
-    const avail = await summarizerAvailability();
+    const avail = await languageModelAvailability();
     if (runId !== this.#aiRunId) return; // toggled off while awaiting
+    this.aiBgDebug = { ...this.aiBgDebug, promptApiAvailability: avail };
     if (avail === 'unavailable') {
       this.aiBgStatus = 'unavailable';
+      this.aiBgDebug = {
+        ...this.aiBgDebug,
+        failureReason:
+          'The on-device Gemini Nano model is unavailable on this device, so ' +
+          'no AI background can be generated.',
+      };
       return;
     }
 
@@ -1287,7 +1351,7 @@ export class TimelineStore {
     this.aiBgStatus =
       avail === 'downloadable' || avail === 'downloading' ? 'downloading' : 'ready';
     try {
-      const summarizer = await createSummarizer((frac) => {
+      const model = await createSvgModel((frac) => {
         if (runId !== this.#aiRunId) return;
         this.aiBgProgress = frac;
         this.aiBgStatus = frac >= 1 ? 'ready' : 'downloading';
@@ -1295,25 +1359,33 @@ export class TimelineStore {
       if (runId !== this.#aiRunId) {
         // Toggled off during create(): discard the freshly made session.
         try {
-          summarizer.destroy();
+          model.destroy();
         } catch {
           // ignore
         }
         return;
       }
-      this.#summarizer = summarizer;
+      this.#svgModel = model;
       this.aiBgStatus = 'ready';
       this.aiBgProgress = 1;
-      // Best-effort, non-blocking: bring up the optional Prompt API session so
-      // structured scenes can enhance the background. Never gates 'ready'.
-      void this.#initSceneModel(runId);
-    } catch {
+      this.aiBgDebug = { ...this.aiBgDebug, svgModelReady: true };
+    } catch (err) {
       if (runId !== this.#aiRunId) return;
       // create() refused — most often a missing user gesture for the download,
       // or the model failing to initialize. Surface it; the toggle can retry.
       this.aiBgStatus = 'error';
+      this.aiBgDebug = {
+        ...this.aiBgDebug,
+        failureReason:
+          'Could not start the Gemini Nano SVG generator: ' + errMessage(err),
+      };
       return;
     }
+
+    // Best-effort, non-blocking: bring up the Summarizer to condense the feed
+    // text we feed the SVG prompt. When absent we send trimmed text directly;
+    // its absence never blocks the (working) background generator.
+    void this.#initSummarizer(runId);
 
     // Heartbeat: periodic refresh even when the visible set is stable.
     this.#aiTimer = setInterval(() => void this.#maybeSummarize(), AI_INTERVAL_MS);
@@ -1329,65 +1401,81 @@ export class TimelineStore {
         // this effect → a self-sustaining loop (effect_update_depth_exceeded).
         // We only want to react to aiContextSig changes, so run the call
         // untracked: its internal reads/writes don't become dependencies.
-        if (this.#summarizer) untrack(() => void this.#maybeSummarize());
+        if (this.#svgModel) untrack(() => void this.#maybeSummarize());
       });
       return () => {};
     });
   }
 
   /**
-   * Best-effort: bring up the optional Prompt API (LanguageModel) session used
-   * to generate a STRUCTURED scene for the background. This is a pure
-   * enhancement — we only create it when the on-device model is already
-   * 'available' (so we never force a separate model download), and any failure
-   * just leaves us on the deterministic summary→SVG path. Never touches
-   * aiBgStatus, so the UI stays quiet about it.
+   * Best-effort: bring up the optional Summarizer (Gemini Nano) session used to
+   * condense the visible feed before it is handed to the SVG generator. To avoid
+   * a second large download surprise we only create it when the on-device model
+   * is already 'available'; otherwise the SVG prompt simply receives the trimmed
+   * raw text. Never touches aiBgStatus — the background generator is independent.
    */
-  async #initSceneModel(runId: number): Promise<void> {
-    if (!isLanguageModelSupported()) return;
+  async #initSummarizer(runId: number): Promise<void> {
+    if (!isSummarizerSupported()) return;
     try {
-      const avail = await languageModelAvailability();
+      const avail = await summarizerAvailability();
       if (runId !== this.#aiRunId) return; // toggled off while awaiting
       if (avail !== 'available') return; // don't trigger a model download here
-      const model = await createSceneModel();
+      const summarizer = await createSummarizer();
       if (runId !== this.#aiRunId) {
         try {
-          model.destroy();
+          summarizer.destroy();
         } catch {
           // ignore
         }
         return;
       }
-      this.#langModel = model;
-      this.aiBgDebug = { ...this.aiBgDebug, sceneModelReady: true };
-      console.info('[nosplay/ai-bg] Prompt API scene model ready (structured scenes enabled)');
+      this.#summarizer = summarizer;
+      console.info('[nosplay/ai-bg] Summarizer ready (condensing feed text for the SVG prompt)');
     } catch {
-      this.#langModel = null; // optional; keep the deterministic path
-      console.info('[nosplay/ai-bg] Prompt API scene model unavailable — using deterministic SVG fallback');
+      this.#summarizer = null; // optional; send trimmed raw text instead
+      console.info('[nosplay/ai-bg] Summarizer unavailable — sending trimmed feed text to the SVG generator');
     }
   }
 
   /**
-   * Turn a summary into the background SVG. Prefers an AI-described STRUCTURED
-   * scene via the optional Prompt API (Gemini Nano) when a session exists and it
-   * returns a valid scene; otherwise (unsupported / create failed / prompt
-   * failed / unparseable) falls back to the deterministic summary→SVG generator.
-   * Always resolves to a usable SVG string.
+   * Generate the background by asking Gemini Nano (the Prompt API) for SVG markup
+   * DIRECTLY, then strictly validating/sanitizing it. There is NO fallback: if no
+   * model session exists, generation throws, or the markup fails validation, this
+   * returns an empty SVG with a reason and the caller draws nothing. `valid` is
+   * true only for markup that both came from the model AND passed validation.
    */
-  async #renderBackgroundSvg(
+  async #generateBackgroundSvg(
     summary: string,
-  ): Promise<{ svg: string; mode: AiRenderMode; scene: BackgroundScene | null }> {
-    if (this.#langModel) {
-      try {
-        const scene = await promptScene(this.#langModel, summary);
-        if (scene) {
-          return { svg: sceneToBackgroundSvg(scene, summary), mode: 'scene', scene };
-        }
-      } catch {
-        // fall through to the deterministic generator
-      }
+  ): Promise<{ svg: string; valid: boolean; rawChars: number; reason: string }> {
+    if (!this.#svgModel) {
+      return {
+        svg: '',
+        valid: false,
+        rawChars: 0,
+        reason: 'Gemini Nano SVG generator is not available.',
+      };
     }
-    return { svg: generateBackgroundSvg(summary), mode: 'deterministic', scene: null };
+    let raw: string;
+    try {
+      raw = await promptSvg(this.#svgModel, summary);
+    } catch (err) {
+      return {
+        svg: '',
+        valid: false,
+        rawChars: 0,
+        reason: 'SVG generation failed: ' + errMessage(err),
+      };
+    }
+    const result = validateAndSanitizeSvg(raw);
+    if (!result.ok) {
+      return {
+        svg: '',
+        valid: false,
+        rawChars: raw.length,
+        reason: 'Generated SVG failed validation: ' + result.reason,
+      };
+    }
+    return { svg: result.svg, valid: true, rawChars: raw.length, reason: '' };
   }
 
   /**
@@ -1434,14 +1522,17 @@ export class TimelineStore {
   }
 
   /**
-   * Summarize the visible feed and regenerate the background SVG — but only when
-   * worth it: skips when disabled / no session / already running, when there is
+   * Condense the visible feed (best-effort, via the Summarizer) and regenerate
+   * the background by asking Gemini Nano for SVG markup DIRECTLY — but only when
+   * worth it: skips when disabled / no SVG model / already running, when there is
    * too little text, when the input is unchanged since last time, or when called
    * again within AI_MIN_GAP_MS (throttle). This is what keeps the feature from
-   * churning despite a per-frame timeline and a 30s heartbeat.
+   * churning despite a per-frame timeline and a 30s heartbeat. There is NO
+   * fallback: a generation/validation failure clears the background and records
+   * the reason rather than drawing anything.
    */
   async #maybeSummarize(): Promise<void> {
-    if (!this.aiBgEnabled || !this.#summarizer || this.#aiBusy) return;
+    if (!this.aiBgEnabled || !this.#svgModel || this.#aiBusy) return;
     const slice = this.#collectVisibleSlice();
     const now = Date.now();
     // Snapshot the source metadata on EVERY run (even ones we skip below) so the
@@ -1457,7 +1548,7 @@ export class TimelineStore {
       sliceEndMs: slice.sliceEndMs,
       inputChars: slice.text.length,
       inputTruncated: slice.truncated,
-      sceneModelReady: this.#langModel !== null,
+      svgModelReady: this.#svgModel !== null,
     };
 
     if (slice.text.length < AI_MIN_CHARS) {
@@ -1479,25 +1570,40 @@ export class TimelineStore {
     this.#aiLastAt = now;
     this.#aiLastInput = slice.text;
     const runId = this.#aiRunId;
-    this.aiBgStatus = 'summarizing';
     try {
-      const summary = (await this.#summarizer.summarize(slice.text)).trim();
-      if (runId !== this.#aiRunId) return; // stopped/restarted meanwhile
+      // Condense the feed text for the SVG prompt when the Summarizer is up;
+      // otherwise hand the trimmed raw text straight to the generator.
+      let summary = slice.text;
+      if (this.#summarizer) {
+        this.aiBgStatus = 'summarizing';
+        summary = (await this.#summarizer.summarize(slice.text)).trim();
+        if (runId !== this.#aiRunId) return; // stopped/restarted meanwhile
+      }
       this.aiBgSummary = summary;
       if (!summary) {
+        // Nothing meaningful to draw from — clear the background, say so.
         this.aiBgSvg = '';
         this.aiBgStatus = 'summary-empty';
         this.aiBgDebug = {
           ...this.aiBgDebug,
           summaryChars: 0,
           svgChars: 0,
+          rawSvgChars: 0,
           renderMode: 'none',
-          scene: null,
+          directSvgUsed: false,
+          svgValid: false,
+          failureReason: 'Summary came back empty — nothing to draw.',
         };
-      } else {
-        // Optional Prompt-API scene enhancement, with deterministic fallback.
-        const { svg, mode, scene } = await this.#renderBackgroundSvg(summary);
-        if (runId !== this.#aiRunId) return; // stopped/restarted while rendering
+        return;
+      }
+
+      // Ask Gemini Nano for the SVG directly, then strictly validate it.
+      this.aiBgStatus = 'generating';
+      const { svg, valid, rawChars, reason } =
+        await this.#generateBackgroundSvg(summary);
+      if (runId !== this.#aiRunId) return; // stopped/restarted while generating
+
+      if (valid) {
         this.aiBgSvg = svg;
         this.aiBgStatus = 'ready';
         this.aiBgDebug = {
@@ -1505,19 +1611,48 @@ export class TimelineStore {
           lastSummaryAt: Date.now(),
           summaryChars: summary.length,
           svgChars: svg.length,
-          renderMode: mode,
-          scene,
+          rawSvgChars: rawChars,
+          renderMode: 'direct-svg',
+          directSvgUsed: true,
+          svgValid: true,
+          failureReason: '',
         };
+      } else {
+        // No fallback: drop any previous background and record exactly why.
+        this.aiBgSvg = '';
+        // A validation failure (model returned markup, but it was unsafe) is
+        // distinct from a generation failure (the model never produced usable
+        // markup), so the status line can tell the user which happened.
+        this.aiBgStatus = rawChars > 0 ? 'invalid-svg' : 'error';
+        this.aiBgDebug = {
+          ...this.aiBgDebug,
+          summaryChars: summary.length,
+          svgChars: 0,
+          rawSvgChars: rawChars,
+          renderMode: 'none',
+          directSvgUsed: false,
+          svgValid: false,
+          failureReason: reason,
+        };
+        console.warn('[nosplay/ai-bg] direct SVG not shown —', reason);
       }
       // The structured console log is emitted from reportAiBgDom() once the
       // Timeline view has measured where this SVG landed in the DOM, so the
       // logged `dom` evidence matches the SVG that was just set above.
     } catch (err) {
       if (runId !== this.#aiRunId) return;
+      this.aiBgSvg = '';
       this.aiBgStatus = 'error';
+      this.aiBgDebug = {
+        ...this.aiBgDebug,
+        renderMode: 'none',
+        directSvgUsed: false,
+        svgValid: false,
+        failureReason: 'AI background failed: ' + errMessage(err),
+      };
       // Allow a retry on the next change/heartbeat rather than wedging on this text.
       this.#aiLastInput = '';
-      console.warn('[nosplay/ai-bg] summarize/render failed', err);
+      console.warn('[nosplay/ai-bg] summarize/generate failed', err);
     } finally {
       this.#aiBusy = false;
     }
@@ -1542,8 +1677,10 @@ export class TimelineStore {
     const d = this.aiBgDebug;
     const v = aiBgVerdict(d, this.aiBgSvg, this.aiBgEnabled);
     console.info(
-      `[nosplay/ai-bg] SVG generated: ${v.svgGenerated ? 'YES' : 'NO'} · ` +
+      `[nosplay/ai-bg] Gemini Nano direct SVG: ${d.directSvgUsed ? 'YES' : 'NO'} · ` +
+        `valid: ${d.svgValid ? 'YES' : 'NO'} · ` +
         `on screen: ${v.visible ? 'YES' : 'NO'}` +
+        (d.failureReason ? ` · ${d.failureReason}` : '') +
         (v.reasons.length ? ` · ${v.reasons.join('; ')}` : ''),
       {
         phase,
@@ -1551,9 +1688,14 @@ export class TimelineStore {
         status: this.aiBgStatus,
         generation: {
           renderMode: d.renderMode,
-          sceneModelReady: d.sceneModelReady,
-          scene: d.scene,
+          promptApiSupported: d.promptApiSupported,
+          promptApiAvailability: d.promptApiAvailability,
+          svgModelReady: d.svgModelReady,
+          directSvgUsed: d.directSvgUsed,
+          svgValid: d.svgValid,
+          failureReason: d.failureReason,
           summaryChars: d.summaryChars,
+          rawSvgChars: d.rawSvgChars,
           svgChars: d.svgChars,
         },
         dom: {
@@ -1664,13 +1806,13 @@ export class TimelineStore {
       }
       this.#summarizer = null;
     }
-    if (this.#langModel) {
+    if (this.#svgModel) {
       try {
-        this.#langModel.destroy();
+        this.#svgModel.destroy();
       } catch {
         // ignore
       }
-      this.#langModel = null;
+      this.#svgModel = null;
     }
     this.#aiBusy = false;
   }

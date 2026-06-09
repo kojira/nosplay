@@ -59,23 +59,21 @@ This project was built to fulfill the [requirements document (要件書)](https:
   the playhead, through the same queue. A paused session stays silent until it is
   playing (or LIVE); manually seeking/nudging or hitting **LIVE** resets the
   speech state so a jump never replays a stale note or talks over a fresh one.
-- **AI summary background** — an optional **✨ AI BG** toggle that, when on,
-  periodically summarizes the currently visible timeline with **Chrome's
-  built-in AI Summarizer (Gemini Nano, on-device)** and renders it as a
-  large, faint, low-opacity **abstract SVG** behind the notes — constellations,
-  ribbons and soft gradients derived from the summary's shape, never its words.
-  When Chrome's **Prompt API** (`LanguageModel`, Gemini Nano) is also available,
-  the model additionally picks a structured palette/scene for that background;
-  otherwise nosplay derives it deterministically. Everything runs locally — no
-  text leaves your device, and there are **no mock/fake AI responses**. It
-  updates on a ~30s heartbeat and on meaningful context change (notes entering /
-  leaving the window), throttled so it never spams the model. A status line
-  always tells you what it's doing (downloading the model, summarizing, ready,
-  or that the summary came back empty when there isn't enough distinct content
-  to paint) or why it's inactive (unsupported browser / model unavailable). The feature
-  degrades gracefully: in browsers without built-in AI the toggle still reflects
-  your choice but clearly says it's unsupported, and the rest of the app is
-  unaffected. See [AI summary background](#ai-summary-background).
+- **AI summary background** — an optional **✨ AI BG** toggle that, when on, has
+  **Chrome's built-in AI Prompt API (`LanguageModel`, Gemini Nano, on-device)**
+  generate the background **SVG markup directly** from the currently visible
+  timeline, and renders it as a large, faint, low-opacity abstract layer behind
+  the notes. The model output is **strictly validated/sanitized** (a tight
+  element/attribute allowlist; no script, event handlers, `<foreignObject>`,
+  `<image>`/`<use>`, `<style>`, or external/`data:` references) before it is ever
+  put in the DOM. There is **no fallback**: if the Prompt API is unsupported, the
+  model is unavailable, generation fails, or the markup fails validation, **no
+  background is drawn** and the status line + debug panel say exactly why. The
+  on-device **Summarizer API** is still used (when available) only to condense
+  the feed text fed to the SVG prompt. Everything runs locally — no text leaves
+  your device, and there are **no mock/fake AI responses**. It updates on a ~30s
+  heartbeat and on meaningful context change, throttled so it never spams the
+  model. See [AI summary background](#ai-summary-background).
 - **Explicit NIP-07 login** — an account bar shows the login state (logged
   out / logging in / logged in / login error), the obtained pubkey (as a short
   npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login
@@ -156,75 +154,93 @@ target; `end` alone seeks there keeping your current window.
 
 ## AI summary background
 
-Toggle **✨ AI BG** (next to the TTS controls) to turn on an ambient, AI-generated
-background. When enabled, nosplay:
+Toggle **✨ AI BG** (next to the TTS controls) to turn on an ambient,
+AI-generated background. The background is produced by **Gemini Nano generating
+the SVG markup directly** — there is **no fallback**. When enabled, nosplay:
 
 1. collects a trimmed slice of the **currently visible** notes' text (the most
    recent ~40 notes / ~4000 chars within the window);
-2. summarizes it with **Chrome's built-in AI Summarizer API** — the on-device
-   **Gemini Nano** model (`type: 'key-points'`, `length: 'short'`,
-   `format: 'plain-text'`);
-3. turns that summary into an abstract SVG **locally** (`src/lib/ai/svg.ts`) — soft
-   gradient blobs, orbital rings, flowing ribbons, and a constellation/star-field.
-   Two paths feed the same local, sanitized assembler:
-   - **deterministic base** — palette, shape counts and seed are derived purely
-     from the summary's word counts, lengths and hashes. Given the same summary
-     it always produces the same image. This is the stable production path.
-   - **optional Prompt-API enhancement** — when Chrome's built-in **Prompt API**
-     (`LanguageModel`, Gemini Nano) is available, nosplay additionally asks the
-     model for a small **structured JSON scene** (a palette key plus shape
-     counts, constrained by a JSON Schema via `responseConstraint`). That scene
-     chooses the palette/mood and shape density; the summary still drives the
-     constellation. Colors and the final SVG are assembled locally — the model
-     only ever returns a palette name and small integers, never markup or text.
+2. (optionally) condenses that text with **Chrome's built-in AI Summarizer API**
+   (on-device Gemini Nano, `type: 'key-points'`, `length: 'short'`,
+   `format: 'plain-text'`) when it's available, purely to give the SVG prompt a
+   tighter input. If the Summarizer isn't available, the trimmed feed text is
+   sent to the generator as-is;
+3. asks **Chrome's built-in AI Prompt API** (`LanguageModel`, Gemini Nano,
+   `src/lib/ai/prompt.ts`) to **generate the background SVG markup directly** —
+   a single abstract, no-text `<svg>` matching the feed's mood. The model emits
+   the actual SVG; nosplay does **not** assemble it from a template or a
+   structured scene;
+4. **strictly validates and sanitizes** that markup (`src/lib/ai/sanitize.ts`)
+   before it touches the DOM. The validator parses the SVG and enforces a tight
+   allowlist:
+   - **allowed elements only**: `svg`, `g`, `defs`, `title`, `desc`, `rect`,
+     `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`,
+     `linearGradient`, `radialGradient`, `stop`;
+   - **rejected outright**: `<script>`, `<style>`, `<foreignObject>`, `<image>`,
+     `<use>`, `text`/`tspan`, animation/filter elements, any `on*` event handler,
+     any `href`/`xlink:href`/namespaced attribute, `style` attributes, and any
+     value containing `javascript:`, `data:`, `expression(`, `@import`, embedded
+     markup, or a non-local `url(...)` (only `url(#localId)` gradient refs pass);
+   - size/element-count caps guard against hostile output.
 
-   In **both** paths **no summary text, words or letters are ever drawn** — only
-   shapes. If the Prompt API is unavailable, the session can't be created, or its
-   output can't be parsed/validated, nosplay **falls back automatically** to the
-   deterministic generator;
-4. draws it as a large, low-opacity layer **behind** the notes (notes stay fully
-   readable and clickable; the background is `aria-hidden` and
+   Validation is **strict and all-or-nothing**: any disallowed element,
+   attribute, or value fails the whole document. There is **no partial stripping**
+   and **no fallback** — on any failure nosplay draws **no background** and
+   surfaces the reason. On success the markup is re-serialized from the checked
+   tree and normalised (`xmlns`, sizing, `role`/`aria-hidden`, `viewBox`);
+5. draws the validated SVG as a large, low-opacity layer **behind** the notes
+   (notes stay fully readable and clickable; the background is `aria-hidden` and
    `pointer-events: none`).
 
 It refreshes on a **~30s heartbeat** and whenever the visible set of notes
-changes meaningfully, but is **throttled** (min ~12s between summaries, and
-identical text is skipped) so it never churns or spams model calls.
+changes meaningfully, but is **throttled** (min ~12s between generations, and
+identical input is skipped) so it never churns or spams model calls.
+
+### No fallback, by design
+
+The **only** source of the background is Gemini Nano's direct SVG output. nosplay
+does **not** fall back to a deterministic/local generator or any canned art. If
+the Prompt API is **unsupported**, the model is **unavailable**, generation
+**fails**, or the output **fails validation**, the background simply isn't shown
+and the UI/debug state says which of those happened.
 
 ### Privacy
 
-Summarization happens entirely **on your device** via Gemini Nano. No timeline
-text is sent to any server for this feature. There are **no mocked or canned AI
+Everything happens entirely **on your device** via Gemini Nano. No timeline text
+is sent to any server for this feature. There are **no mocked or canned AI
 responses** — if the model isn't available, the feature simply stays inactive
 (with a clear status message) rather than faking output.
 
 ### Requirements, support & constraints
 
-The Summarizer API is **Chrome's built-in AI**, not a Web standard available
-everywhere yet. To actually see summaries you need:
+The Prompt API and Summarizer API are **Chrome's built-in AI**, not a Web
+standard available everywhere yet. The background generator depends on the
+**Prompt API (`LanguageModel`)** specifically. To actually see a background you
+need:
 
-- **Chrome 138+** (desktop: Windows 10/11, macOS 13+, or Linux; also recent
-  ChromeOS). The global `Summarizer` API reached stable around Chrome 138.
+- A recent **Chrome** with the built-in AI **Prompt API** (`LanguageModel`)
+  enabled. At time of writing it is partly **origin-trial / `chrome://flags`**
+  -gated (e.g. *Prompt API for Gemini Nano*, plus *Optimization Guide On Device
+  Model*), and its surface changes between versions — check
+  [the Prompt API docs](https://developer.chrome.com/docs/ai/prompt-api) for the
+  current setup. The Summarizer step additionally uses the
+  [Summarizer API](https://developer.chrome.com/docs/ai/summarizer-api) when
+  present, but its absence only means the raw feed text is used.
 - Hardware that can host the model: roughly **>22 GB free disk**, **>4 GB VRAM**
   / a reasonably capable GPU, and an unmetered network for the **one-time model
   download** (the model is several GB and is shared across sites).
 - On first use the model may need to **download**. Per the spec this requires a
-  **user gesture**, which is why nosplay only calls `Summarizer.create()` from
+  **user gesture**, which is why nosplay only calls `LanguageModel.create()` from
   the enable toggle. If you reload with the feature left on and the model still
   needs downloading, just toggle it off/on once to grant the gesture.
-- If you're on an older/dev Chrome where the API is still behind a flag, enable
-  the relevant **`chrome://flags`** entries (e.g. *Summarization API for Gemini
-  Nano*, and *Optimization Guide On Device Model*), then restart Chrome. Flag
-  names and availability change between versions — check
-  [the Summarizer API docs](https://developer.chrome.com/docs/ai/summarizer-api)
-  for the current setup. You can inspect model state at
-  `chrome://on-device-internals`.
+- You can inspect model state at `chrome://on-device-internals`.
 
 ### Unsupported browsers
 
-The feature **degrades gracefully**. In Firefox, Safari, older Chrome, or any
-browser without the built-in AI Summarizer, the toggle still reflects your
-on/off choice but the status line clearly states it's **not supported**, no
-background is drawn, and nothing else in the app is affected.
+In Firefox, Safari, older Chrome, or any browser without the built-in AI Prompt
+API, the toggle still reflects your on/off choice but the status line clearly
+states it's **not supported**, **no background is drawn**, and nothing else in
+the app is affected.
 
 ### Debugging & visibility
 
@@ -232,49 +248,23 @@ Because the feature depends on browser-specific on-device models, it ships with
 explicit diagnostics so it's easy to see what it's doing (or why it isn't):
 
 - **AI debug panel** — when AI BG is on, a compact, collapsible *"AI debug —
-  summary & source range"* panel appears under the status line. It shows the
-  **actual summary text**, the **source range** that was summarized (the
-  `created_at` span of the slice and the visible window), how many notes were
-  **summarized vs visible**, the **input / summary / SVG char counts** (and
-  whether the input was truncated to the char budget), the **render mode**
-  (Prompt-API scene — with palette — vs deterministic fallback), and the time of
-  the **last run**. When there isn't enough text yet, it says so and reports how
-  many more characters are needed.
-- **Console logging** — every summarization run logs a structured
-  `[nosplay/ai-bg]` object to the browser console (status, render mode, scene
-  data, visible/summarized counts, char counts, window/slice timestamps, and the
-  summary itself), so SVG/scene generation results are always inspectable. Scene
-  model readiness and any summarize/render failures are logged too.
+  Gemini Nano direct SVG"* panel appears under the status line. It shows three
+  headline badges — **Direct SVG** (did Gemini Nano produce SVG), **Validated**
+  (did it pass strict validation), and **On screen** (did it reach the DOM) — the
+  **failure reason** when something blocked it, the **Prompt API support /
+  availability** and model readiness, the **actual summary/prompt text**, the
+  **source range** and visible/summarized note counts, the **input / summary /
+  raw-SVG / shown-SVG char counts**, the **render mode** (`direct-svg` or
+  `none`), DOM/layer measurements, and the time of the **last run**.
+- **Console logging** — every run logs a structured `[nosplay/ai-bg]` object to
+  the browser console whose headline reads *"Gemini Nano direct SVG: YES/NO ·
+  valid: YES/NO · on screen: YES/NO"* plus the failure reason, with the full
+  generation state (Prompt API support/availability, model readiness, raw vs
+  shown SVG char counts), DOM evidence, source slice, and the full generated SVG
+  markup so it can be copied straight out of the console.
 
 All of this is **runtime-only diagnostics** (never persisted) and is cleared when
 the feature is toggled off.
-
-### The Prompt API (optional enhancement)
-
-nosplay uses the **Summarizer API** as the **production base** for the text
-summary because it is the most stable, purpose-built built-in-AI surface for
-that task. The more general **Prompt API** (`LanguageModel`,
-`src/lib/ai/prompt.ts`) is used **only as an optional enhancement**: when it is
-present, nosplay asks Gemini Nano for a **structured JSON scene** (palette +
-shape counts, constrained by a JSON Schema) that drives the abstract background,
-instead of deriving everything deterministically from the summary.
-
-This path is **best-effort and may simply be absent** for you:
-
-- The Prompt API is **less widely available** than the Summarizer. At time of
-  writing it is partly **origin-trial / `chrome://flags`-gated** (e.g. *Prompt
-  API for Gemini Nano*) and its surface changes between Chrome versions, so it
-  is **not assumed** to exist. nosplay feature-detects it cleanly.
-- To avoid surprising the user with a second large download, nosplay only
-  creates a Prompt API session when the on-device model is already
-  `available` — it **never forces a download** for this enhancement.
-- If the API is missing, the session can't be created, the prompt fails, or the
-  JSON can't be parsed/validated, nosplay **falls back automatically** to the
-  deterministic summary→SVG generator. The summary itself still comes from the
-  Summarizer either way, so turning this on never breaks the base feature.
-
-In short: **Summarizer = summary (stable)**, **Prompt API = nicer background
-when your Chrome happens to support it**, with a deterministic local fallback.
 
 ## Relays
 
@@ -322,7 +312,7 @@ and publishes `dist/` to GitHub Pages. The workflow sets `BASE_PATH` to
 ## Tech
 
 Svelte 5 (runes) · TypeScript · Vite · [nostr-tools](https://github.com/nbd-wtf/nostr-tools)
-`SimplePool` · `idb` · [Chrome built-in AI Summarizer](https://developer.chrome.com/docs/ai/summarizer-api) (Gemini Nano, on-device).
+`SimplePool` · `idb` · Chrome built-in AI: [Prompt API](https://developer.chrome.com/docs/ai/prompt-api) (`LanguageModel`, generates the background SVG directly) and [Summarizer API](https://developer.chrome.com/docs/ai/summarizer-api) (Gemini Nano, on-device).
 
 ## Project layout
 
@@ -341,8 +331,8 @@ src/
     nostr/
       pool.ts relays.ts follows.ts profiles.ts post.ts types.ts
     ai/
-      summarizer.ts             Chrome built-in AI (Gemini Nano) Summarizer wrapper (summary base)
-      prompt.ts                 optional Prompt API (LanguageModel) wrapper → structured scene JSON
-      svg.ts                    summary/scene → faint abstract background SVG (no text), local + sanitized
+      summarizer.ts             Chrome built-in AI (Gemini Nano) Summarizer wrapper (optional input condenser)
+      prompt.ts                 Prompt API (LanguageModel) wrapper → Gemini Nano generates background SVG directly
+      sanitize.ts               strict allowlist validator/sanitizer for the model's SVG (no fallback)
     tts.ts                      Web Speech API wrapper
 ```

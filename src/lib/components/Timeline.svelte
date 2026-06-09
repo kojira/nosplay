@@ -284,12 +284,14 @@
   aria-label="Live timeline of notes"
   bind:clientWidth={containerW}
 >
-  <!-- AI summary background: a large, faint, locally-generated SVG behind the
-       notes. Only present when the feature is on and a summary has been made.
-       aria-hidden + pointer-events:none keep it purely decorative. -->
+  <!-- AI summary background: a large, faint SVG that Gemini Nano generated
+       directly, behind the notes. Only present when the feature is on and a
+       background was produced. aria-hidden + pointer-events:none keep it purely
+       decorative. -->
   {#if timeline.aiBgEnabled && timeline.aiBgSvg}
-    <!-- eslint-disable-next-line svelte/no-at-html-tags — SVG is generated
-         locally from a deterministic template, not user HTML. -->
+    <!-- eslint-disable-next-line svelte/no-at-html-tags — aiBgSvg is model output
+         that has passed the strict allowlist validator/sanitizer in
+         src/lib/ai/sanitize.ts before reaching the store, so it is safe to inline. -->
     <div class="ai-bg" aria-hidden="true" bind:this={aiBgEl}>{@html timeline.aiBgSvg}</div>
   {/if}
 

@@ -56,21 +56,25 @@
   const aiBgLabel = $derived.by(() => {
     switch (timeline.aiBgStatus) {
       case 'unsupported':
-        return 'AI background: not supported in this browser (needs Chrome built-in AI). Toggle stays as you set it.';
+        return 'AI background: not supported — this browser has no built-in AI Prompt API (LanguageModel) to generate the SVG. No background is drawn.';
       case 'unavailable':
-        return 'AI background: on-device model unavailable on this device.';
+        return 'AI background: the on-device Gemini Nano model is unavailable on this device. No background is drawn.';
       case 'downloading':
         return `AI background: downloading Gemini Nano model… ${Math.round(timeline.aiBgProgress * 100)}%`;
       case 'ready':
-        return timeline.aiBgSummary
-          ? 'AI background: on — summarizing the visible timeline.'
-          : 'AI background: ready — waiting for enough notes to summarize.';
+        return timeline.aiBgSvg
+          ? 'AI background: on — Gemini Nano is generating the SVG directly.'
+          : 'AI background: ready — waiting for enough notes to generate an SVG.';
       case 'summarizing':
-        return 'AI background: summarizing the visible timeline…';
+        return 'AI background: condensing the visible timeline for the SVG prompt…';
+      case 'generating':
+        return 'AI background: Gemini Nano is generating the background SVG…';
       case 'summary-empty':
-        return 'AI background: summary came back empty — not enough distinct content to paint yet.';
+        return 'AI background: nothing distinct enough to draw from yet.';
+      case 'invalid-svg':
+        return 'AI background: Gemini Nano returned SVG that failed strict validation — nothing was drawn (no fallback).';
       case 'error':
-        return 'AI background: could not start. Click the toggle again to grant model access / retry.';
+        return 'AI background: SVG generation could not run. Click the toggle again to grant model access / retry.';
       default:
         return 'AI background: off.';
     }
@@ -82,16 +86,10 @@
   const aiDebug = $derived(timeline.aiBgDebug);
   const aiHasRun = $derived(aiDebug.lastRunAt > 0);
   const aiRenderLabel = $derived.by(() => {
-    switch (aiDebug.renderMode) {
-      case 'scene':
-        return `Prompt API scene${aiDebug.scene ? ` · ${aiDebug.scene.palette}` : ''}`;
-      case 'deterministic':
-        return aiDebug.sceneModelReady
-          ? 'deterministic (scene declined)'
-          : 'deterministic fallback';
-      default:
-        return aiDebug.sceneModelReady ? 'scene model ready' : 'no scene model';
-    }
+    if (aiDebug.renderMode === 'direct-svg')
+      return 'Gemini Nano direct SVG (validated)';
+    if (aiDebug.failureReason) return `none — ${aiDebug.failureReason}`;
+    return aiDebug.svgModelReady ? 'none — SVG model ready' : 'none — no SVG model';
   });
   const aiSliceLabel = $derived(
     aiDebug.sliceStartMs > 0
@@ -504,7 +502,7 @@
         <button
           class:active={timeline.aiBgEnabled}
           onclick={() => timeline.toggleAiBackground()}
-          title="Summarize the visible timeline with on-device Gemini Nano and paint it as a faint background"
+          title="Have on-device Gemini Nano generate a faint abstract SVG background directly from the visible timeline (no fallback; strictly validated before display)"
         >
           ✨ AI BG {timeline.aiBgEnabled ? 'on' : 'off'}
         </button>
@@ -516,6 +514,7 @@
         class="ai-status"
         class:warn={timeline.aiBgStatus === 'unsupported' ||
           timeline.aiBgStatus === 'unavailable' ||
+          timeline.aiBgStatus === 'invalid-svg' ||
           timeline.aiBgStatus === 'error'}
         role="status"
       >
@@ -523,17 +522,25 @@
       </div>
 
       <details class="ai-debug">
-        <summary>AI debug — SVG generation: {aiVerdict.svgGenerated ? 'YES' : 'NO'}</summary>
+        <summary>AI debug — Gemini Nano direct SVG: {aiDebug.directSvgUsed ? 'YES' : 'NO'}</summary>
         <div class="ai-debug-body">
-          <!-- Headline verdict: answers "is SVG generation working?" at a glance,
-               with a second badge for whether it actually reached the screen. -->
+          <!-- Headline verdict: did Gemini Nano generate valid SVG directly, and
+               did that result actually reach the screen? No fallback path exists,
+               so a NO means no background is drawn. -->
           <div class="ai-verdict" role="status">
             <span
               class="ai-badge"
-              class:yes={aiVerdict.svgGenerated}
-              class:no={!aiVerdict.svgGenerated}
+              class:yes={aiDebug.directSvgUsed}
+              class:no={!aiDebug.directSvgUsed}
             >
-              SVG generated: {aiVerdict.svgGenerated ? 'YES' : 'NO'}
+              Direct SVG: {aiDebug.directSvgUsed ? 'YES' : 'NO'}
+            </span>
+            <span
+              class="ai-badge"
+              class:yes={aiDebug.svgValid}
+              class:no={!aiDebug.svgValid}
+            >
+              Validated: {aiDebug.svgValid ? 'YES' : 'NO'}
             </span>
             <span
               class="ai-badge"
@@ -543,6 +550,11 @@
               On screen: {aiVerdict.visible ? 'YES' : 'NO'}
             </span>
           </div>
+          {#if aiDebug.failureReason}
+            <div class="ai-verdict-reasons">
+              Failure: {aiDebug.failureReason}
+            </div>
+          {/if}
           {#if aiVerdict.reasons.length}
             <div class="ai-verdict-reasons">
               Blocked by: {aiVerdict.reasons.join('; ')}.
@@ -560,10 +572,16 @@
             {:else if aiHasRun}
               No summary produced yet.
             {:else}
-              Waiting for the first summarization run…
+              Waiting for the first generation run…
             {/if}
           </div>
           <dl class="ai-debug-meta">
+            <div>
+              <dt>Prompt API</dt>
+              <dd>
+                {aiDebug.promptApiSupported ? 'supported' : 'unsupported'} · {aiDebug.promptApiAvailability}{aiDebug.svgModelReady ? ' · model ready' : ''}
+              </dd>
+            </div>
             <div><dt>source range</dt><dd>{aiSliceLabel}</dd></div>
             <div><dt>window</dt><dd>{aiWindowLabel}</dd></div>
             <div>
@@ -576,8 +594,12 @@
             </div>
             <div><dt>summary</dt><dd>{aiDebug.summaryChars} chars</dd></div>
             <div>
-              <dt>svg</dt>
-              <dd>{aiDebug.svgChars} chars{aiDebug.svgChars === 0 ? ' (empty)' : ''}</dd>
+              <dt>raw svg</dt>
+              <dd>{aiDebug.rawSvgChars} chars{aiDebug.rawSvgChars === 0 ? ' (none)' : ''}</dd>
+            </div>
+            <div>
+              <dt>shown svg</dt>
+              <dd>{aiDebug.svgChars} chars{aiDebug.svgChars === 0 ? ' (none)' : ''}</dd>
             </div>
             <div><dt>render</dt><dd>{aiRenderLabel}</dd></div>
             <div>
