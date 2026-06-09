@@ -70,8 +70,9 @@ export interface SvgInspection {
   value: string;
 }
 
-// The fixed canvas the model is told to draw on (see prompt.ts). A missing
-// viewBox is normalised to this rather than rejected.
+// Fallback canvas used only when a missing viewBox can't be inferred from the
+// SVG's own width/height (see inferViewBox). A missing viewBox is normalised
+// rather than rejected.
 const DEFAULT_VIEWBOX = '0 0 1000 600';
 
 /** Hard caps to keep a hostile/huge response from being expensive to handle. */
@@ -82,9 +83,12 @@ const SNIPPET_CAP = 200;
 
 /**
  * The ONLY elements allowed in the generated art. Deliberately a small,
- * abstract-shape + gradient subset — enough for rich ambient art, nothing that
- * can script, load, embed, or style externally. `title`/`desc` are accessibility
- * metadata (plain text only) and harmless.
+ * abstract-shape + gradient + text subset — enough for rich ambient art,
+ * nothing that can script, load, embed, or style externally. `title`/`desc` are
+ * accessibility metadata (plain text only) and harmless. `text`/`tspan` render
+ * plain glyphs and are safe here: the dangerous text vector, `<textPath>`, needs
+ * an `href` to a path and is NOT in this list, and all `href`/namespaced
+ * attributes are rejected below regardless.
  *
  * NOTE the canonical SVG casing of `linearGradient`/`radialGradient`. Element
  * names are matched case-INSENSITIVELY against `ALLOWED_ELEMENTS_LC` below, so a
@@ -106,6 +110,8 @@ const ALLOWED_ELEMENTS = new Set<string>([
   'linearGradient',
   'radialGradient',
   'stop',
+  'text',
+  'tspan',
 ]);
 
 /**
@@ -175,6 +181,27 @@ const ALLOWED_ATTRS = new Set<string>([
   'paint-order',
   'mix-blend-mode',
   'pointer-events',
+  // text layout / typography (for <text>/<tspan>; plain glyph rendering only)
+  'dx',
+  'dy',
+  'text-anchor',
+  'dominant-baseline',
+  'alignment-baseline',
+  'baseline-shift',
+  'font-family',
+  'font-size',
+  'font-size-adjust',
+  'font-style',
+  'font-variant',
+  'font-weight',
+  'font-stretch',
+  'letter-spacing',
+  'word-spacing',
+  'text-decoration',
+  'writing-mode',
+  'white-space',
+  'lengthadjust',
+  'textlength',
   // a11y
   'role',
   'aria-hidden',
@@ -203,6 +230,34 @@ function attrValueIsDangerous(value: string): boolean {
     if (stripped.includes('url(')) return true;
   }
   return false;
+}
+
+/**
+ * Parse an SVG length attribute to a positive user-unit number, or null when it
+ * isn't a usable absolute length (percentages, `auto`, garbage). A leading
+ * numeric value with an absolute unit suffix (`px`, none, etc.) is accepted as
+ * best-effort user units; `%` is rejected because it can't define a coordinate
+ * system.
+ */
+function parseLength(value: string | null): number | null {
+  if (!value) return null;
+  const v = value.trim();
+  if (v.endsWith('%')) return null; // relative — no fixed coordinate system
+  const n = parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Build a viewBox from concrete width/height, or null when either is missing or
+ * relative. Lets a model that sized its <svg> but omitted a viewBox keep its own
+ * coordinate system (`0 0 W H`) instead of being forced onto a mismatched
+ * default canvas — the cause of art collapsing into the top-left corner.
+ */
+function inferViewBox(width: string | null, height: string | null): string | null {
+  const w = parseLength(width);
+  const h = parseLength(height);
+  if (w === null || h === null) return null;
+  return `0 0 ${w} ${h}`;
 }
 
 /**
@@ -384,7 +439,19 @@ export function inspectSvg(raw: string): SvgInspection {
   // Passed validation. Normalise the root so the layer renders predictably and
   // is inert (decorative, non-interactive).
   root.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-  if (!root.getAttribute('viewBox')) root.setAttribute('viewBox', DEFAULT_VIEWBOX);
+  // Resolve the coordinate system BEFORE overwriting width/height with '100%'.
+  // When the model omits a viewBox but sized its <svg> (e.g. width="400"
+  // height="400"), those dimensions ARE its coordinate system; adopt them as the
+  // viewBox so the art keeps filling the canvas. Forcing the default 1000×600
+  // over 400×400 content would shrink the art into the top-left corner. Only
+  // fall back to DEFAULT_VIEWBOX when there's no usable size to infer from.
+  if (!root.getAttribute('viewBox')) {
+    const inferred = inferViewBox(
+      root.getAttribute('width'),
+      root.getAttribute('height'),
+    );
+    root.setAttribute('viewBox', inferred ?? DEFAULT_VIEWBOX);
+  }
   root.setAttribute('width', '100%');
   root.setAttribute('height', '100%');
   if (!root.getAttribute('preserveAspectRatio'))

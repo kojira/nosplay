@@ -171,7 +171,7 @@ the SVG markup directly** — there is **no fallback**. When enabled, nosplay:
    sent to the generator as-is;
 3. asks **Chrome's built-in AI Prompt API** (`LanguageModel`, Gemini Nano,
    `src/lib/ai/prompt.ts`) to **generate the background SVG markup directly** —
-   a single abstract, no-text `<svg>` matching the feed's mood. The model emits
+   a single abstract `<svg>` matching the feed's mood. The model emits
    the actual SVG; nosplay does **not** assemble it from a template or a
    structured scene. The system and user prompts are now **simple defaults that
    you can edit** — both are exposed as live, editable fields in the AI debug
@@ -187,19 +187,23 @@ the SVG markup directly** — there is **no fallback**. When enabled, nosplay:
    allowlist:
    - **allowed elements only**: `svg`, `g`, `defs`, `title`, `desc`, `rect`,
      `circle`, `ellipse`, `line`, `polyline`, `polygon`, `path`,
-     `linearGradient`, `radialGradient`, `stop`;
+     `linearGradient`, `radialGradient`, `stop`, `text`, `tspan`;
    - **rejected outright**: `<script>`, `<style>`, `<foreignObject>`, `<image>`,
-     `<use>`, `text`/`tspan`, animation/filter elements, any `on*` event handler,
+     `<use>`, `<textPath>`, animation/filter elements, any `on*` event handler,
      any `href`/`xlink:href`/namespaced attribute, `style` attributes, and any
      value containing `javascript:`, `data:`, `expression(`, `@import`, embedded
-     markup, or a non-local `url(...)` (only `url(#localId)` gradient refs pass);
+     markup, or a non-local `url(...)` (only `url(#localId)` gradient refs pass).
+     `text`/`tspan` render plain glyphs only — the `href`-bearing `<textPath>`
+     stays rejected;
    - size/element-count caps guard against hostile output.
 
    Validation is **strict and all-or-nothing**: any disallowed element,
    attribute, or value fails the whole document. There is **no partial stripping**
    and **no fallback** — on any failure nosplay draws **no background** and
    surfaces the reason. On success the markup is re-serialized from the checked
-   tree and normalised (`xmlns`, sizing, `role`/`aria-hidden`, `viewBox`);
+   tree and normalised (`xmlns`, sizing, `role`/`aria-hidden`, `viewBox` —
+   inferred from the SVG's own `width`/`height` when absent, so the art fills the
+   layer instead of collapsing into the top-left corner);
 5. draws the validated SVG as a large, low-opacity layer **behind** the notes
    (notes stay fully readable and clickable; the background is `aria-hidden` and
    `pointer-events: none`).
