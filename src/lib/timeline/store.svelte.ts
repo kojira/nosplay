@@ -179,6 +179,9 @@ export class TimelineStore {
   #persistStop: (() => void) | null = null; // disposes the save effect
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
   #pendingPlayheadMs: number | null = null; // paused playhead awaiting history load
+  // A view range from a share link (?start=&end=), applied during connect() so
+  // it overrides persisted playback. Epoch ms; either bound may be undefined.
+  #pendingShare: { startMs?: number; endMs?: number } | null = null;
 
   /** Relays to publish to (mirrors the active read relays in scope here). */
   get writeRelays(): string[] {
@@ -421,6 +424,31 @@ export class TimelineStore {
       }
     }
 
+    // A share link (?start=&end=) overrides any persisted playback: end becomes
+    // the playhead and end-start becomes the window, so the link reproduces the
+    // captured range. Window applies now (history-independent); the playhead is
+    // re-clamped after history loads, like the restored paused playhead above.
+    const share = this.#pendingShare;
+    if (share) {
+      this.#pendingShare = null;
+      const { startMs, endMs } = share;
+      if (
+        typeof startMs === 'number' &&
+        typeof endMs === 'number' &&
+        endMs - startMs >= 1000
+      ) {
+        this.windowMs = endMs - startMs;
+      }
+      // Right edge = end if given, else the start time (a bare jump target).
+      const target = typeof endMs === 'number' ? endMs : startMs;
+      if (typeof target === 'number') {
+        this.isLive = false;
+        this.isPlaying = false;
+        this.#pendingPlayheadMs = target;
+        this.playheadMs = target; // provisional; re-clamped post-history
+      }
+    }
+
     // Persist whenever the small settings or the live flag change. The playhead
     // is read untracked so the ~60fps live clock does not trigger saves; explicit
     // seeks call #scheduleSave() themselves.
@@ -477,7 +505,15 @@ export class TimelineStore {
     // Still paused? clamp into the loaded range. If the user already went LIVE
     // or seeked during the await, leave their choice alone.
     if (!this.isLive) {
-      this.playheadMs = clamp(ms, this.earliestMs, Date.now());
+      const now = Date.now();
+      this.playheadMs = clamp(ms, this.earliestMs, now);
+      // Mirror seekTo: a target at/beyond now means "follow live" — relevant for
+      // share links whose end is the current edge (a restored paused playhead is
+      // always in the past, so this never flips it).
+      if (this.playheadMs >= now) {
+        this.isLive = true;
+        this.isPlaying = true;
+      }
     }
   }
 
@@ -800,6 +836,16 @@ export class TimelineStore {
 
   setSpeed(n: number): void {
     if (n > 0 && Number.isFinite(n)) this.speed = n;
+  }
+
+  /**
+   * Stage a shared view range to apply on the next connect(). Call before
+   * connect() so it overrides persisted playback; the playhead is clamped into
+   * the loaded range once history arrives. start/end are epoch ms (either may be
+   * undefined). No-op once connect() has consumed the staged range.
+   */
+  applyShareRange(opts: { startMs?: number; endMs?: number }): void {
+    this.#pendingShare = opts;
   }
 
   /** Re-follow wall-clock now. */

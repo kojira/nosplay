@@ -4,6 +4,7 @@
   import TimeAxis from './lib/components/TimeAxis.svelte';
   import { timeline } from './lib/timeline/store.svelte';
   import { hms, shortNpub } from './lib/timeline/format';
+  import { parseShareParams, buildShareUrl } from './lib/share';
   import type { RelayMode } from './lib/timeline/store.svelte';
 
   // ---- local UI state --------------------------------------------------
@@ -138,6 +139,31 @@
     if (Number.isFinite(ms)) timeline.seekTo(ms);
   }
 
+  // ---- share link ------------------------------------------------------
+  // Transient confirmation shown after copying a share link; cleared on a timer.
+  let shareNotice = $state('');
+  let shareTimer: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * Copy a link to the current view range. The right edge (playhead, or now when
+   * LIVE) is the end; the left edge (end − window) is the start. The link encodes
+   * a fixed range, so a live view shares the moment it was captured.
+   */
+  async function onShare(): Promise<void> {
+    const end = timeline.playheadMs;
+    const url = buildShareUrl(end - timeline.windowMs, end);
+    try {
+      await navigator.clipboard.writeText(url);
+      shareNotice = 'Link copied!';
+    } catch {
+      // Clipboard blocked (no permission / insecure context): show the URL so
+      // the user can copy it manually.
+      shareNotice = url;
+    }
+    if (shareTimer) clearTimeout(shareTimer);
+    shareTimer = setTimeout(() => (shareNotice = ''), 4000);
+  }
+
   async function submitPost(): Promise<void> {
     const text = composer.trim();
     if (!text || posting || !canPost) return;
@@ -169,12 +195,18 @@
     nowTimer = setInterval(() => {
       nowMs = Date.now();
     }, 250);
+    // A share link (?start=&end=) stages a view range that connect() applies on
+    // top of persisted playback, so the link wins. Absent params, behavior is
+    // unchanged. Stage before connect() so it is consumed during startup.
+    const share = parseShareParams(window.location.search);
+    if (share) timeline.applyShareRange(share);
     // Connect on mount: opens relay sockets, fetches history, subscribes live.
     void timeline.connect();
   });
 
   onDestroy(() => {
     if (nowTimer) clearInterval(nowTimer);
+    if (shareTimer) clearTimeout(shareTimer);
     // Disconnect on destroy: closes all relay subscriptions and stops the loop.
     timeline.disconnect();
   });
@@ -339,6 +371,15 @@
         <button onclick={() => timeline.nudge(-60_000)} title="Back 1 minute">−1m</button>
         <button onclick={() => timeline.nudge(60_000)} title="Forward 1 minute">+1m</button>
         <button class:active={timeline.isLive} onclick={() => timeline.goLive()}>● LIVE</button>
+        <button
+          onclick={onShare}
+          title="Copy a link to the current view range (start/end times)"
+        >
+          🔗 Share
+        </button>
+        {#if shareNotice}
+          <span class="share-notice" role="status">{shareNotice}</span>
+        {/if}
       </div>
 
       <div class="group">
@@ -701,6 +742,11 @@
   }
   .group.right {
     margin-left: auto;
+  }
+  .share-notice {
+    font-size: 12px;
+    color: var(--accent);
+    white-space: nowrap;
   }
 
   .field {

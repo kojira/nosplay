@@ -31,6 +31,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   (1×–20×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
   `datetime-local` jump to seek to any past moment within the loaded history.
+- **Shareable range links** — a **🔗 Share** button copies a link to the view
+  you are looking at. Opening that link reproduces the same time range (see
+  [Share links](#share-links)).
 - **Text-to-speech** — optional read-aloud of new notes via the browser's
   Web Speech API. A **Voice** selector next to the TTS toggle lets you pick any
   voice the browser offers; the list populates asynchronously (via
@@ -106,6 +109,31 @@ When you click **Connect (NIP-07)**:
 **Refresh follows** re-runs steps 2–3 (e.g. after you follow new accounts).
 **Reconnect** tears down and rebuilds the current feed with the current relay
 settings without re-resolving follows.
+
+## Share links
+
+Click **🔗 Share** to copy a link to the current view. The link captures the
+visible range as two concise query params:
+
+| Param   | Meaning                                   | Units               |
+| ------- | ----------------------------------------- | ------------------- |
+| `start` | Left edge of the window (`end − window`)  | epoch **seconds**   |
+| `end`   | Right edge / playhead                     | epoch **seconds**   |
+
+For example `…/?start=1718000000&end=1718000300` opens a 5-minute window ending
+at `end`. Opening a link:
+
+- seeks the playhead to `end` and sets the window to `end − start`, so the exact
+  shared range is shown;
+- pauses (the link is a **fixed** range — sharing while LIVE captures the moment
+  you clicked, not a moving "now"); if `end` is at or beyond the current time it
+  snaps back to **LIVE** instead;
+- **overrides** persisted playback for that load, and clamps the playhead into
+  the loaded history once it arrives.
+
+When neither param is present the app behaves exactly as before (restoring your
+persisted playback / starting live). `start` alone is treated as a bare jump
+target; `end` alone seeks there keeping your current window.
 
 ## Relays
 
