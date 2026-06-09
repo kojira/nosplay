@@ -115,6 +115,47 @@
         : 'not in DOM',
   );
 
+  // ---- always-visible AI summary card ----------------------------------
+  // One user-facing state for the summary shown on the main UI (not just the
+  // collapsible debug panel). Reuses the same status + debug snapshot the panel
+  // reads, so the card and the diagnostics never disagree. Four states:
+  //  - 'available' the latest summary text is ready to show
+  //  - 'empty'     a run happened but there wasn't enough/distinct text
+  //  - 'waiting'   the model is up but the first run hasn't produced anything
+  //  - 'failure'   the feature can't run (unsupported / unavailable / errored)
+  type AiSummaryState = 'available' | 'empty' | 'waiting' | 'failure';
+  const aiSummaryState = $derived.by<AiSummaryState>(() => {
+    const s = timeline.aiBgStatus;
+    // Hard blocks: the summary can never appear in these states.
+    if (s === 'unsupported' || s === 'unavailable') return 'failure';
+    // A summary we already have always wins over transient/SVG-only errors.
+    if (timeline.aiBgSummary) return 'available';
+    if (aiDebug.notEnoughText || s === 'summary-empty') return 'empty';
+    if (s === 'invalid-svg' || s === 'error') return 'failure';
+    if (!aiHasRun) return 'waiting';
+    return 'empty';
+  });
+  // Short badge label + tone for each state (tone drives the accent colour).
+  const aiSummaryBadge = $derived.by<{ label: string; tone: 'ok' | 'info' | 'warn' }>(() => {
+    switch (aiSummaryState) {
+      case 'available':
+        return { label: 'Summary ready', tone: 'ok' };
+      case 'empty':
+        return { label: 'Not enough text', tone: 'info' };
+      case 'waiting':
+        return { label: 'Waiting for first run', tone: 'info' };
+      case 'failure':
+        return { label: 'Unavailable', tone: 'warn' };
+    }
+  });
+  // Where/what was summarized, in human terms: counts + the created_at span of
+  // the slice that fed the last run. Reuses aiSliceLabel (the source range).
+  const aiSummaryMeta = $derived.by(() => {
+    if (!aiHasRun) return 'No summary run yet.';
+    const counts = `${aiDebug.summarizedCount} of ${aiDebug.visibleCount} visible notes`;
+    return aiDebug.sliceStartMs > 0 ? `${counts} · ${aiSliceLabel}` : counts;
+  });
+
   // ---- auth / follow / relay UI ---------------------------------------
   const loginLabel = $derived(
     {
@@ -519,6 +560,37 @@
         role="status"
       >
         {aiBgLabel}
+      </div>
+
+      <!-- Always-visible AI summary: the current summary text (or a clear
+           placeholder), a state badge, and which slice it came from. Mirrors
+           the same status/debug snapshot as the debug panel below. -->
+      <div class="ai-summary-card" data-state={aiSummaryState} role="status">
+        <div class="ai-summary-head">
+          <span class="ai-summary-badge" data-tone={aiSummaryBadge.tone}>
+            {aiSummaryBadge.label}
+          </span>
+          <span class="ai-summary-meta">{aiSummaryMeta}</span>
+        </div>
+        <div
+          class="ai-summary-text"
+          class:placeholder={aiSummaryState !== 'available'}
+        >
+          {#if aiSummaryState === 'available'}
+            {timeline.aiBgSummary}
+          {:else if aiSummaryState === 'empty'}
+            {#if aiDebug.notEnoughText}
+              Not enough visible note text yet — need ~{aiDebug.charsNeeded} more
+              characters.
+            {:else}
+              Nothing distinct enough to summarize from the current view yet.
+            {/if}
+          {:else if aiSummaryState === 'waiting'}
+            Waiting for the first summary run…
+          {:else}
+            {aiBgLabel}
+          {/if}
+        </div>
       </div>
 
       <details class="ai-debug">
@@ -1003,6 +1075,75 @@
   }
   .ai-status.warn {
     color: #e0b341;
+  }
+
+  /* Always-visible AI summary card. A left accent stripe (coloured per state)
+     plus a small badge make the current state legible at a glance without
+     opening the debug panel. */
+  .ai-summary-card {
+    margin-top: 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--text-dim);
+    background: var(--bg-3);
+  }
+  .ai-summary-card[data-state='available'] {
+    border-left-color: var(--accent);
+  }
+  .ai-summary-card[data-state='failure'] {
+    border-left-color: var(--live);
+  }
+  .ai-summary-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .ai-summary-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .ai-summary-badge[data-tone='ok'] {
+    color: #6cc070;
+    background: rgba(108, 192, 112, 0.12);
+    border-color: rgba(108, 192, 112, 0.35);
+  }
+  .ai-summary-badge[data-tone='info'] {
+    color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--border);
+  }
+  .ai-summary-badge[data-tone='warn'] {
+    color: #e0b341;
+    background: rgba(224, 179, 65, 0.12);
+    border-color: rgba(224, 179, 65, 0.35);
+  }
+  .ai-summary-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .ai-summary-text {
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 6em;
+    overflow-y: auto;
+  }
+  .ai-summary-text.placeholder {
+    color: var(--text-dim);
+    font-style: italic;
   }
 
   /* Compact, subtle diagnostic panel for the AI background. Collapsed by
