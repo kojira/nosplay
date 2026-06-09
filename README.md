@@ -302,6 +302,30 @@ npm run build     # production build to dist/
 npm run preview   # preview the production build
 ```
 
+## SVG smoke test
+
+A tiny, isolated page that answers one question: **can Chrome's built-in AI
+Prompt API / Gemini Nano return an SVG string from a short text prompt?** It
+reuses the real `src/lib/ai/prompt.ts` and `src/lib/ai/sanitize.ts` helpers (no
+mocks) and is separate from the app — it touches no product logic.
+
+Steps:
+
+1. `npm run dev`
+2. Open **http://localhost:5173/svg-smoke.html** (dev base is `/`).
+3. Click **Run**.
+
+**Browser-only:** it must run in a **Chrome build with the Prompt API / Gemini
+Nano enabled** (see *AI summary background → Requirements*). It **cannot run in
+Node/CI** — `npm run build` only proves the page compiles, not that generation
+works. If the API is unsupported/unavailable the status line says so and stops.
+
+What to look at:
+
+- the **RAW `<pre>` output** — the model's verbatim, untrusted text;
+- the **VALID / INVALID** result from the strict validator (`validateAndSanitizeSvg`);
+  on **VALID** the sanitized SVG is rendered below it.
+
 ## Deploy
 
 Pushing to `main` triggers `.github/workflows/deploy.yml`, which builds the app
