@@ -87,7 +87,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
 - **Persistence** — window size, speed, TTS toggle, the selected TTS voice, the
   per-author TTS mute list, the **AI background** toggle, a paused playhead
   position, your relay settings (mode + manual list), and a "remember login"
-  hint are saved to IndexedDB and restored on reload. Once you have logged in at least
+  hint are saved to IndexedDB and restored on reload. Muting or un-muting an
+  author is written immediately (not debounced), so the change survives a reload
+  that happens right after. Once you have logged in at least
   once, the next session silently re-attempts NIP-07 login (most signers
   remember the granted permission, so this does not re-prompt); *Log out* clears
   the hint.

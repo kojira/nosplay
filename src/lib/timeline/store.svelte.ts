@@ -256,7 +256,8 @@ export class TimelineStore {
   #aiRunId = 0;
 
   // ---- persistence (IndexedDB via persist.ts) ----
-  #persistReady = false; // true once the saved state has been loaded/applied
+  #persistReady = false; // true once persistence init has started (reentrancy guard)
+  #hydrated = false; // true only after saved state (incl. mutedPubkeys) is applied
   #persistStop: (() => void) | null = null; // disposes the save effect
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
   #pendingPlayheadMs: number | null = null; // paused playhead awaiting history load
@@ -536,6 +537,9 @@ export class TimelineStore {
       }
     }
 
+    // Saved state (including mutedPubkeys) is now fully applied; TTS may run.
+    this.#hydrated = true;
+
     // Persist whenever the small settings or the live flag change. The playhead
     // is read untracked so the ~60fps live clock does not trigger saves; explicit
     // seeks call #scheduleSave() themselves.
@@ -565,6 +569,21 @@ export class TimelineStore {
       this.#saveTimer = null;
       void savePlayback(this.#snapshot());
     }, 400);
+  }
+
+  /**
+   * Persist the current settings slice immediately, cancelling any pending
+   * debounced save. Used for state the user must not lose on a quick refresh
+   * (e.g. TTS mute/unmute): the async IDB write is kicked off right away instead
+   * of after the 400ms debounce, so a reload moments later cannot drop it.
+   */
+  #saveNow(): void {
+    if (!this.#persistReady) return;
+    if (this.#saveTimer !== null) {
+      clearTimeout(this.#saveTimer);
+      this.#saveTimer = null;
+    }
+    void savePlayback(this.#snapshot());
   }
 
   /** The slice of state we persist between sessions. */
@@ -757,6 +776,7 @@ export class TimelineStore {
    */
   #enqueueTts(note: Note): void {
     if (!this.ttsEnabled || !hasTts()) return;
+    if (!this.#hydrated) return; // never speak before mutedPubkeys is restored
     if (!this.#ttsLive || !this.isLive) return;
     if (this.mutedPubkeys.has(note.pubkey)) return; // permanently muted author
     this.#ttsQueue.push({ id: note.id, pubkey: note.pubkey, text: note.content });
@@ -782,6 +802,7 @@ export class TimelineStore {
    */
   #speakPlayheadHead(): void {
     if (!this.ttsEnabled || !hasTts()) return;
+    if (!this.#hydrated) return; // never speak before mutedPubkeys is restored
     if (this.isLive) return; // live arrivals are handled by #enqueueTts
     const head = this.headNote;
     if (!head) return;
@@ -990,7 +1011,7 @@ export class TimelineStore {
       this.#ttsBusy = false;
       this.#drainTts();
     }
-    this.#scheduleSave();
+    this.#saveNow();
   }
 
   /** Un-mute a previously muted author (persisted). No-op if not muted. */
@@ -999,7 +1020,7 @@ export class TimelineStore {
     const next = new Set(this.mutedPubkeys);
     next.delete(pubkey);
     this.mutedPubkeys = next;
-    this.#scheduleSave();
+    this.#saveNow();
   }
 
   /** Toggle an author's permanent TTS mute (persisted). */
@@ -1231,6 +1252,7 @@ export class TimelineStore {
       this.#persistStop = null;
     }
     this.#persistReady = false;
+    this.#hydrated = false; // re-gate TTS until the next connect re-hydrates
     if (this.#profileTimer !== null) {
       clearTimeout(this.#profileTimer);
       this.#profileTimer = null;
