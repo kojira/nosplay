@@ -18,9 +18,38 @@ import {
 } from '../tts';
 import { loadPlayback, savePlayback } from './persist';
 import type { Note } from '../nostr/types';
+import {
+  isSummarizerSupported,
+  summarizerAvailability,
+  createSummarizer,
+  type SummarizerInstance,
+} from '../ai/summarizer';
+import { generateBackgroundSvg } from '../ai/svg';
 
 export type Status = 'idle' | 'connecting' | 'live' | 'limited' | 'error';
 export type Mode = 'follows' | 'limited';
+
+/**
+ * Lifecycle/availability of the AI summary background. Surfaced in the UI so the
+ * user always knows why the feature is or isn't drawing anything:
+ *  - 'off'           the feature is disabled
+ *  - 'unsupported'   this browser has no built-in AI Summarizer API
+ *  - 'unavailable'   API present but the model can't run (e.g. no capacity)
+ *  - 'downloadable'  enabling will trigger a model download (needs a click)
+ *  - 'downloading'   the on-device model is being fetched (progress %)
+ *  - 'ready'         summarizer live, waiting for / between summaries
+ *  - 'summarizing'   a summary is being generated right now
+ *  - 'error'         creating/summarizing failed
+ */
+export type AiBgStatus =
+  | 'off'
+  | 'unsupported'
+  | 'unavailable'
+  | 'downloadable'
+  | 'downloading'
+  | 'ready'
+  | 'summarizing'
+  | 'error';
 
 /** Explicit NIP-07 login lifecycle, surfaced in the UI. */
 export type LoginState = 'logged-out' | 'logging-in' | 'logged-in' | 'login-error';
@@ -37,6 +66,17 @@ const HISTORY_LIMIT = 500;
 const LIVE_GLOBAL_LIMIT = 200;
 /** Max live notes buffered for TTS; older ones are dropped during a flood. */
 const TTS_QUEUE_MAX = 50;
+
+// ---- AI summary background tuning ----
+/** Heartbeat: re-summarize the visible feed at most this often (interval). */
+const AI_INTERVAL_MS = 30_000;
+/** Floor between two summaries, so a context change can't trigger churn. */
+const AI_MIN_GAP_MS = 12_000;
+/** Cap how many recent visible notes / chars we feed the summarizer. */
+const AI_MAX_NOTES = 40;
+const AI_MAX_CHARS = 4000;
+/** Don't bother summarizing fewer than this many characters of feed text. */
+const AI_MIN_CHARS = 80;
 
 export class TimelineStore {
   // ---- reactive state ----
@@ -71,6 +111,18 @@ export class TimelineStore {
   earliestMs = $state<number>(Date.now());
   names = $state<Map<string, ProfileMeta>>(new Map());
   error = $state<string | null>(null);
+
+  // ---- AI summary background (Chrome built-in AI / Gemini Nano) ----
+  /** User toggle for the AI summary background. Persisted across sessions. */
+  aiBgEnabled = $state<boolean>(false);
+  /** Lifecycle/availability for the UI status line. */
+  aiBgStatus = $state<AiBgStatus>('off');
+  /** Model download progress 0..1 while aiBgStatus === 'downloading'. */
+  aiBgProgress = $state<number>(0);
+  /** Latest AI-generated summary text of the visible feed, or '' when none. */
+  aiBgSummary = $state<string>('');
+  /** SVG markup derived from aiBgSummary, rendered as the faint background. */
+  aiBgSvg = $state<string>('');
 
   // ---- auth (NIP-07) ----
   loginState = $state<LoginState>('logged-out');
@@ -136,6 +188,18 @@ export class TimelineStore {
       : null,
   );
 
+  /**
+   * Cheap signature of the *set* of visible notes (count + first/last id). It
+   * changes only when notes enter/leave the window, NOT on every animation frame
+   * (playheadMs ticks but the visible set is usually unchanged), so an effect
+   * keyed on this value fires on meaningful context change rather than per-frame.
+   */
+  aiContextSig = $derived.by<string>(() => {
+    const v = this.visibleNotes;
+    if (v.length === 0) return '';
+    return `${v.length}:${v[0].id}:${v[v.length - 1].id}`;
+  });
+
   // ---- internal (non-reactive) ----
   #ids = new Set<string>();
   #subs: SubCloser[] = [];
@@ -174,6 +238,22 @@ export class TimelineStore {
   #pendingProfilePks = new Set<string>();
   #profileTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // ---- AI summary background (non-reactive) ----
+  /** Active Summarizer session (Gemini Nano), or null when not running. */
+  #summarizer: SummarizerInstance | null = null;
+  /** Heartbeat interval handle for periodic re-summarization. */
+  #aiTimer: ReturnType<typeof setInterval> | null = null;
+  /** Disposes the $effect that reacts to context changes. */
+  #aiEffectStop: (() => void) | null = null;
+  /** Epoch ms of the last summary, for throttling (AI_MIN_GAP_MS). */
+  #aiLastAt = 0;
+  /** Signature of the last summarized input, so identical text is skipped. */
+  #aiLastInput = '';
+  /** True while a summarize() call is in flight (prevents overlap). */
+  #aiBusy = false;
+  /** Guards against a stale start() resolving after the user toggled off. */
+  #aiRunId = 0;
+
   // ---- persistence (IndexedDB via persist.ts) ----
   #persistReady = false; // true once the saved state has been loaded/applied
   #persistStop: (() => void) | null = null; // disposes the save effect
@@ -198,6 +278,9 @@ export class TimelineStore {
     // Restore persisted settings/state before we start the live clock.
     await this.#initPersistence();
     this.#initVoices();
+    // If the AI background was left on last session, try to resume it (no user
+    // gesture here, so a model download may need a re-toggle — handled inside).
+    void this.#resumeAiBackgroundIfEnabled();
     this.status = 'connecting';
     this.error = null;
     this.hasSigner = hasNip07();
@@ -412,6 +495,9 @@ export class TimelineStore {
           saved.mutedPubkeys.filter((pk): pk is string => typeof pk === 'string'),
         );
       }
+      if (typeof saved.aiBgEnabled === 'boolean') {
+        this.aiBgEnabled = saved.aiBgEnabled;
+      }
       // Playhead only restores when the last session was paused (not LIVE);
       // a live session reloads live, following wall-clock now. The actual
       // playhead is applied after history loads (see #applyPendingPlayhead),
@@ -463,6 +549,7 @@ export class TimelineStore {
         void this.relayMode;
         void this.manualRelays;
         void this.mutedPubkeys;
+        void this.aiBgEnabled;
         this.#scheduleSave();
       });
       return () => {};
@@ -494,6 +581,7 @@ export class TimelineStore {
       manualRelays: this.manualRelays,
       rememberLogin: this.#rememberLogin,
       mutedPubkeys: [...this.mutedPubkeys],
+      aiBgEnabled: this.aiBgEnabled,
     };
   }
 
@@ -938,11 +1026,188 @@ export class TimelineStore {
   }
 
   // ============================================================
+  // AI summary background (Chrome built-in AI / Gemini Nano)
+  // ============================================================
+  /**
+   * Toggle the AI summary background. MUST be reachable from a user gesture so
+   * enabling can trigger the on-device model download — the Summarizer spec
+   * requires transient activation for the first create(). Enabling brings the
+   * summarizer online and starts the heartbeat; disabling tears it all down but
+   * keeps the user's choice (persisted via aiBgEnabled).
+   */
+  async toggleAiBackground(): Promise<void> {
+    this.aiBgEnabled = !this.aiBgEnabled;
+    if (this.aiBgEnabled) {
+      await this.#startAiBackground();
+    } else {
+      this.#stopAiBackground();
+    }
+  }
+
+  /**
+   * On restore: if the user left the feature on last session, try to resume it.
+   * There is no user gesture here, so a model *download* may be refused — that's
+   * fine; #startAiBackground surfaces the state and the user can re-toggle to
+   * grant activation. If the model is already present this resumes seamlessly.
+   */
+  async #resumeAiBackgroundIfEnabled(): Promise<void> {
+    if (!this.aiBgEnabled) return;
+    await this.#startAiBackground();
+  }
+
+  /**
+   * Bring the summarizer online and start the heartbeat + context-change effect.
+   * Feature-detects first and never throws to the caller; every failure mode
+   * lands in aiBgStatus. Leaves aiBgEnabled untouched (that is the user choice).
+   */
+  async #startAiBackground(): Promise<void> {
+    const runId = ++this.#aiRunId;
+    this.#teardownAiSession(); // drop any previous session first
+
+    if (!isSummarizerSupported()) {
+      this.aiBgStatus = 'unsupported';
+      return;
+    }
+
+    const avail = await summarizerAvailability();
+    if (runId !== this.#aiRunId) return; // toggled off while awaiting
+    if (avail === 'unavailable') {
+      this.aiBgStatus = 'unavailable';
+      return;
+    }
+
+    this.aiBgProgress = 0;
+    this.aiBgStatus =
+      avail === 'downloadable' || avail === 'downloading' ? 'downloading' : 'ready';
+    try {
+      const summarizer = await createSummarizer((frac) => {
+        if (runId !== this.#aiRunId) return;
+        this.aiBgProgress = frac;
+        this.aiBgStatus = frac >= 1 ? 'ready' : 'downloading';
+      });
+      if (runId !== this.#aiRunId) {
+        // Toggled off during create(): discard the freshly made session.
+        try {
+          summarizer.destroy();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      this.#summarizer = summarizer;
+      this.aiBgStatus = 'ready';
+      this.aiBgProgress = 1;
+    } catch {
+      if (runId !== this.#aiRunId) return;
+      // create() refused — most often a missing user gesture for the download,
+      // or the model failing to initialize. Surface it; the toggle can retry.
+      this.aiBgStatus = 'error';
+      return;
+    }
+
+    // Heartbeat: periodic refresh even when the visible set is stable.
+    this.#aiTimer = setInterval(() => void this.#maybeSummarize(), AI_INTERVAL_MS);
+    // React to meaningful context changes (notes entering/leaving the window).
+    // Both paths are throttled inside #maybeSummarize so they never spam create.
+    this.#aiEffectStop = $effect.root(() => {
+      $effect(() => {
+        void this.aiContextSig; // track; act on change
+        if (this.#summarizer) void this.#maybeSummarize();
+      });
+      return () => {};
+    });
+  }
+
+  /** Collect a trimmed, recent slice of visible note text for summarization. */
+  #collectVisibleText(): string {
+    const notes = this.visibleNotes;
+    if (notes.length === 0) return '';
+    const recent = notes.slice(-AI_MAX_NOTES);
+    let text = recent
+      .map((n) => n.content.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n');
+    // Keep the most recent tail if we're over the char budget.
+    if (text.length > AI_MAX_CHARS) text = text.slice(text.length - AI_MAX_CHARS);
+    return text;
+  }
+
+  /**
+   * Summarize the visible feed and regenerate the background SVG — but only when
+   * worth it: skips when disabled / no session / already running, when there is
+   * too little text, when the input is unchanged since last time, or when called
+   * again within AI_MIN_GAP_MS (throttle). This is what keeps the feature from
+   * churning despite a per-frame timeline and a 30s heartbeat.
+   */
+  async #maybeSummarize(): Promise<void> {
+    if (!this.aiBgEnabled || !this.#summarizer || this.#aiBusy) return;
+    const text = this.#collectVisibleText();
+    if (text.length < AI_MIN_CHARS) return; // not enough to summarize
+    if (text === this.#aiLastInput) return; // unchanged content
+    const now = Date.now();
+    if (now - this.#aiLastAt < AI_MIN_GAP_MS) return; // throttle churn
+
+    this.#aiBusy = true;
+    this.#aiLastAt = now;
+    this.#aiLastInput = text;
+    const runId = this.#aiRunId;
+    this.aiBgStatus = 'summarizing';
+    try {
+      const summary = await this.#summarizer.summarize(text);
+      if (runId !== this.#aiRunId) return; // stopped/restarted meanwhile
+      this.aiBgSummary = summary;
+      this.aiBgSvg = generateBackgroundSvg(summary);
+      this.aiBgStatus = 'ready';
+    } catch {
+      if (runId !== this.#aiRunId) return;
+      this.aiBgStatus = 'error';
+      // Allow a retry on the next change/heartbeat rather than wedging on this text.
+      this.#aiLastInput = '';
+    } finally {
+      this.#aiBusy = false;
+    }
+  }
+
+  /** Stop the feature: tear down the session and clear all derived output. */
+  #stopAiBackground(): void {
+    this.#aiRunId++; // invalidate any in-flight start()/summarize()
+    this.#teardownAiSession();
+    this.aiBgStatus = 'off';
+    this.aiBgProgress = 0;
+    this.aiBgSummary = '';
+    this.aiBgSvg = '';
+    this.#aiLastInput = '';
+    this.#aiLastAt = 0;
+  }
+
+  /** Dispose the timer, context effect, and summarizer session (idempotent). */
+  #teardownAiSession(): void {
+    if (this.#aiTimer !== null) {
+      clearInterval(this.#aiTimer);
+      this.#aiTimer = null;
+    }
+    if (this.#aiEffectStop) {
+      this.#aiEffectStop();
+      this.#aiEffectStop = null;
+    }
+    if (this.#summarizer) {
+      try {
+        this.#summarizer.destroy();
+      } catch {
+        // ignore
+      }
+      this.#summarizer = null;
+    }
+    this.#aiBusy = false;
+  }
+
+  // ============================================================
   // Teardown
   // ============================================================
   disconnect(): void {
     this.stop();
     this.#stopSpeech();
+    this.#stopAiBackground();
     if (this.#voicesStop) {
       this.#voicesStop();
       this.#voicesStop = null;

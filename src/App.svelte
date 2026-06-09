@@ -49,6 +49,30 @@
   // window.nostr availability is reflected by canPost (set during connect()).
   const canPost = $derived(timeline.canPost);
 
+  // ---- AI summary background -------------------------------------------
+  // A human-readable status line for the AI (Gemini Nano) background, shown
+  // whenever the feature is toggled on so the user always knows what it's doing.
+  const aiBgLabel = $derived.by(() => {
+    switch (timeline.aiBgStatus) {
+      case 'unsupported':
+        return 'AI background: not supported in this browser (needs Chrome built-in AI). Toggle stays as you set it.';
+      case 'unavailable':
+        return 'AI background: on-device model unavailable on this device.';
+      case 'downloading':
+        return `AI background: downloading Gemini Nano model… ${Math.round(timeline.aiBgProgress * 100)}%`;
+      case 'ready':
+        return timeline.aiBgSummary
+          ? 'AI background: on — summarizing the visible timeline.'
+          : 'AI background: ready — waiting for enough notes to summarize.';
+      case 'summarizing':
+        return 'AI background: summarizing the visible timeline…';
+      case 'error':
+        return 'AI background: could not start. Click the toggle again to grant model access / retry.';
+      default:
+        return 'AI background: off.';
+    }
+  });
+
   // ---- auth / follow / relay UI ---------------------------------------
   const loginLabel = $derived(
     {
@@ -433,8 +457,27 @@
         >
           🔊 TTS {timeline.ttsEnabled ? 'on' : 'off'}
         </button>
+        <button
+          class:active={timeline.aiBgEnabled}
+          onclick={() => timeline.toggleAiBackground()}
+          title="Summarize the visible timeline with on-device Gemini Nano and paint it as a faint background"
+        >
+          ✨ AI BG {timeline.aiBgEnabled ? 'on' : 'off'}
+        </button>
       </div>
     </div>
+
+    {#if timeline.aiBgEnabled}
+      <div
+        class="ai-status"
+        class:warn={timeline.aiBgStatus === 'unsupported' ||
+          timeline.aiBgStatus === 'unavailable' ||
+          timeline.aiBgStatus === 'error'}
+        role="status"
+      >
+        {aiBgLabel}
+      </div>
+    {/if}
 
     <!-- composer at the very bottom -->
     <div class="composer-row">
@@ -794,6 +837,15 @@
     font-size: 12px;
     color: var(--text-dim);
     line-height: 1.4;
+  }
+
+  .ai-status {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+  .ai-status.warn {
+    color: #e0b341;
   }
 
   select,

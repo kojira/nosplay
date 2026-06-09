@@ -237,6 +237,15 @@
   aria-label="Live timeline of notes"
   bind:clientWidth={containerW}
 >
+  <!-- AI summary background: a large, faint, locally-generated SVG behind the
+       notes. Only present when the feature is on and a summary has been made.
+       aria-hidden + pointer-events:none keep it purely decorative. -->
+  {#if timeline.aiBgEnabled && timeline.aiBgSvg}
+    <!-- eslint-disable-next-line svelte/no-at-html-tags — SVG is generated
+         locally from a deterministic template, not user HTML. -->
+    <div class="ai-bg" aria-hidden="true">{@html timeline.aiBgSvg}</div>
+  {/if}
+
   {#if placed.length === 0}
     <div class="empty">
       {#if timeline.status === 'connecting'}
@@ -340,6 +349,30 @@
     overflow: hidden;
     background: var(--bg);
     min-height: 0;
+  }
+
+  /* AI summary background: fills the timeline, sits above the base bg but below
+     every note (notes default to z-index auto/0, painted later in the DOM).
+     Low opacity + pointer-events:none keep the notes fully readable/clickable. */
+  .ai-bg {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    opacity: 0.14;
+    pointer-events: none;
+    overflow: hidden;
+    /* Ease summary swaps so the background doesn't pop when it updates. */
+    transition: opacity 0.6s ease;
+  }
+  .ai-bg :global(svg) {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ai-bg {
+      transition: none;
+    }
   }
 
   .empty {

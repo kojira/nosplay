@@ -24,6 +24,8 @@ export interface PlaybackState {
   rememberLogin: boolean;
   /** Hex pubkeys whose notes are permanently muted for TTS. */
   mutedPubkeys: string[];
+  /** Whether the AI (Gemini Nano) summary background is enabled. */
+  aiBgEnabled: boolean;
 }
 
 let dbp: Promise<IDBPDatabase> | null = null;

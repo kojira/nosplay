@@ -59,6 +59,18 @@ This project was built to fulfill the [requirements document (要件書)](https:
   the playhead, through the same queue. A paused session stays silent until it is
   playing (or LIVE); manually seeking/nudging or hitting **LIVE** resets the
   speech state so a jump never replays a stale note or talks over a fresh one.
+- **AI summary background** — an optional **✨ AI BG** toggle that, when on,
+  periodically summarizes the currently visible timeline with **Chrome's
+  built-in AI Summarizer (Gemini Nano, on-device)** and paints the summary as a
+  large, faint, low-opacity SVG behind the notes. Everything runs locally — no
+  text leaves your device, and there are **no mock/fake AI responses**. It
+  updates on a ~30s heartbeat and on meaningful context change (notes entering /
+  leaving the window), throttled so it never spams the model. A status line
+  always tells you what it's doing (downloading the model, summarizing, ready) or
+  why it's inactive (unsupported browser / model unavailable). The feature
+  degrades gracefully: in browsers without built-in AI the toggle still reflects
+  your choice but clearly says it's unsupported, and the rest of the app is
+  unaffected. See [AI summary background](#ai-summary-background).
 - **Explicit NIP-07 login** — an account bar shows the login state (logged
   out / logging in / logged in / login error), the obtained pubkey (as a short
   npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login
@@ -72,9 +84,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   from, and choose how your manual list combines with the follow-derived one
   (see [Relays](#relays)).
 - **Persistence** — window size, speed, TTS toggle, the selected TTS voice, the
-  per-author TTS mute list, a paused playhead position, your relay settings
-  (mode + manual list), and a "remember login" hint are saved to IndexedDB and
-  restored on reload. Once you have logged in at least
+  per-author TTS mute list, the **AI background** toggle, a paused playhead
+  position, your relay settings (mode + manual list), and a "remember login"
+  hint are saved to IndexedDB and restored on reload. Once you have logged in at least
   once, the next session silently re-attempts NIP-07 login (most signers
   remember the granted permission, so this does not re-prompt); *Log out* clears
   the hint.
@@ -135,6 +147,71 @@ When neither param is present the app behaves exactly as before (restoring your
 persisted playback / starting live). `start` alone is treated as a bare jump
 target; `end` alone seeks there keeping your current window.
 
+## AI summary background
+
+Toggle **✨ AI BG** (next to the TTS controls) to turn on an ambient, AI-generated
+background. When enabled, nosplay:
+
+1. collects a trimmed slice of the **currently visible** notes' text (the most
+   recent ~40 notes / ~4000 chars within the window);
+2. summarizes it with **Chrome's built-in AI Summarizer API** — the on-device
+   **Gemini Nano** model (`type: 'key-points'`, `length: 'short'`,
+   `format: 'plain-text'`);
+3. turns that summary into an SVG **locally** with a deterministic generator
+   (`src/lib/ai/svg.ts`) — faint blobs, a wandering poly-line, and the key
+   phrases rendered as big ghosted text;
+4. draws it as a large, low-opacity layer **behind** the notes (notes stay fully
+   readable and clickable; the background is `aria-hidden` and
+   `pointer-events: none`).
+
+It refreshes on a **~30s heartbeat** and whenever the visible set of notes
+changes meaningfully, but is **throttled** (min ~12s between summaries, and
+identical text is skipped) so it never churns or spams model calls.
+
+### Privacy
+
+Summarization happens entirely **on your device** via Gemini Nano. No timeline
+text is sent to any server for this feature. There are **no mocked or canned AI
+responses** — if the model isn't available, the feature simply stays inactive
+(with a clear status message) rather than faking output.
+
+### Requirements, support & constraints
+
+The Summarizer API is **Chrome's built-in AI**, not a Web standard available
+everywhere yet. To actually see summaries you need:
+
+- **Chrome 138+** (desktop: Windows 10/11, macOS 13+, or Linux; also recent
+  ChromeOS). The global `Summarizer` API reached stable around Chrome 138.
+- Hardware that can host the model: roughly **>22 GB free disk**, **>4 GB VRAM**
+  / a reasonably capable GPU, and an unmetered network for the **one-time model
+  download** (the model is several GB and is shared across sites).
+- On first use the model may need to **download**. Per the spec this requires a
+  **user gesture**, which is why nosplay only calls `Summarizer.create()` from
+  the enable toggle. If you reload with the feature left on and the model still
+  needs downloading, just toggle it off/on once to grant the gesture.
+- If you're on an older/dev Chrome where the API is still behind a flag, enable
+  the relevant **`chrome://flags`** entries (e.g. *Summarization API for Gemini
+  Nano*, and *Optimization Guide On Device Model*), then restart Chrome. Flag
+  names and availability change between versions — check
+  [the Summarizer API docs](https://developer.chrome.com/docs/ai/summarizer-api)
+  for the current setup. You can inspect model state at
+  `chrome://on-device-internals`.
+
+### Unsupported browsers
+
+The feature **degrades gracefully**. In Firefox, Safari, older Chrome, or any
+browser without the built-in AI Summarizer, the toggle still reflects your
+on/off choice but the status line clearly states it's **not supported**, no
+background is drawn, and nothing else in the app is affected.
+
+### A note on the Prompt API
+
+nosplay deliberately uses the **Summarizer API** as the production path because
+it is the most stable, purpose-built built-in-AI surface for this task. The more
+general **Prompt API** (`LanguageModel`) could also produce a summary (or even
+richer structured output for the SVG), but at time of writing it is less stable
+and partly origin-trial / flag-gated, so this app does **not** depend on it.
+
 ## Relays
 
 The timeline reads from a set of **read relays**. Two sources feed that set:
@@ -181,7 +258,7 @@ and publishes `dist/` to GitHub Pages. The workflow sets `BASE_PATH` to
 ## Tech
 
 Svelte 5 (runes) · TypeScript · Vite · [nostr-tools](https://github.com/nbd-wtf/nostr-tools)
-`SimplePool` · `idb`.
+`SimplePool` · `idb` · [Chrome built-in AI Summarizer](https://developer.chrome.com/docs/ai/summarizer-api) (Gemini Nano, on-device).
 
 ## Project layout
 
@@ -199,5 +276,8 @@ src/
       format.ts                 display helpers (time, npub)
     nostr/
       pool.ts relays.ts follows.ts profiles.ts post.ts types.ts
+    ai/
+      summarizer.ts             Chrome built-in AI (Gemini Nano) Summarizer wrapper
+      svg.ts                    deterministic summary → faint background SVG
     tts.ts                      Web Speech API wrapper
 ```
