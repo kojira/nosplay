@@ -61,8 +61,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   speech state so a jump never replays a stale note or talks over a fresh one.
 - **AI summary background** — an optional **✨ AI BG** toggle that, when on,
   periodically summarizes the currently visible timeline with **Chrome's
-  built-in AI Summarizer (Gemini Nano, on-device)** and paints the summary as a
-  large, faint, low-opacity SVG behind the notes. Everything runs locally — no
+  built-in AI Summarizer (Gemini Nano, on-device)** and renders it as a
+  large, faint, low-opacity **abstract SVG** behind the notes — constellations,
+  ribbons and soft gradients derived from the summary's shape, never its words. Everything runs locally — no
   text leaves your device, and there are **no mock/fake AI responses**. It
   updates on a ~30s heartbeat and on meaningful context change (notes entering /
   leaving the window), throttled so it never spams the model. A status line
@@ -160,9 +161,10 @@ background. When enabled, nosplay:
 2. summarizes it with **Chrome's built-in AI Summarizer API** — the on-device
    **Gemini Nano** model (`type: 'key-points'`, `length: 'short'`,
    `format: 'plain-text'`);
-3. turns that summary into an SVG **locally** with a deterministic generator
-   (`src/lib/ai/svg.ts`) — faint blobs, a wandering poly-line, and the key
-   phrases rendered as big ghosted text;
+3. turns that summary into an abstract SVG **locally** with a deterministic generator
+   (`src/lib/ai/svg.ts`) — soft gradient blobs, orbital rings, flowing ribbons, and a
+   constellation/star-field whose layout is derived from the summary's word counts,
+   lengths and hashes. **No summary text, words or letters are ever drawn** — only shapes;
 4. draws it as a large, low-opacity layer **behind** the notes (notes stay fully
    readable and clickable; the background is `aria-hidden` and
    `pointer-events: none`).
@@ -281,6 +283,6 @@ src/
       pool.ts relays.ts follows.ts profiles.ts post.ts types.ts
     ai/
       summarizer.ts             Chrome built-in AI (Gemini Nano) Summarizer wrapper
-      svg.ts                    deterministic summary → faint background SVG
+      svg.ts                    deterministic summary → faint abstract background SVG (no text)
     tts.ts                      Web Speech API wrapper
 ```
