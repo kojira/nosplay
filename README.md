@@ -27,7 +27,10 @@ This project was built to fulfill the [requirements document (要件書)](https:
   **Auto (Japanese)** option keeps the original behavior: a Japanese voice is
   selected when the browser offers one (and the utterance language defaults to
   `ja-JP`) so CJK text is read naturally rather than spelled out by a default
-  English voice. Your choice is stored by its stable `voiceURI`, persists across
+  English voice. English-looking notes are automatically read with an English
+  voice instead (auto-picked from the browser, falling back to `en-US` if none
+  is available), while the Voice selection stays the Japanese baseline used for
+  non-English text. Your choice is stored by its stable `voiceURI`, persists across
   reloads, and falls back to Auto if that voice is no longer available. URLs and
   Nostr identifiers (npub/note/etc.) are stripped or replaced before speaking so
   they aren't read aloud. The note currently being read aloud is highlighted in

@@ -29,9 +29,12 @@ export function sanitizeForSpeech(text: string): string {
 // Browsers populate the voice list asynchronously, so we cache it and refresh
 // on the `voiceschanged` event. By default we prefer a Japanese voice so CJK
 // text is read naturally rather than spelled out by a default (often English)
-// voice. The user may override this with an explicit voice (see selectedVoiceURI).
+// voice. The user may override this with an explicit voice (see selectedVoiceURI),
+// which becomes the Japanese baseline for non-English text. English-looking text
+// is auto-routed to an English voice instead, regardless of that selection.
 
 let cachedJaVoice: SpeechSynthesisVoice | null = null;
+let cachedEnVoice: SpeechSynthesisVoice | null = null;
 let voicesPrimed = false;
 
 // A user-selected voice, identified by its stable voiceURI. Null means "Auto"
@@ -52,11 +55,40 @@ function pickJapaneseVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice
   return ja.find((v) => v.default) ?? ja.find((v) => v.localService) ?? ja[0];
 }
 
+/** True when a voice's language tag denotes English (`en`, `en-US`, …). */
+function isEnglish(voice: SpeechSynthesisVoice): boolean {
+  return /^en(-|_|$)/i.test(voice.lang);
+}
+
+/** Pick the best available English voice, preferring default/local ones. */
+function pickEnglishVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVoice | null {
+  const en = voices.filter(isEnglish);
+  if (en.length === 0) return null;
+  return en.find((v) => v.default) ?? en.find((v) => v.localService) ?? en[0];
+}
+
+/**
+ * Heuristic: is the sanitized text "English enough" to route to an English
+ * voice? Any CJK (kana/kanji/fullwidth-kana) disqualifies it; otherwise we
+ * require at least a couple of Latin letters that dominate the letters
+ * present, so stray Latin words inside CJK text don't flip the language.
+ */
+function isEnglishText(text: string): boolean {
+  const hasCJK = /[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ]/.test(text);
+  if (hasCJK) return false;
+  const latin = (text.match(/[A-Za-z]/g) ?? []).length;
+  const letters = (text.match(/\p{L}/gu) ?? []).length;
+  return latin >= 2 && latin >= letters * 0.8;
+}
+
 /** Refresh the cached Japanese voice from the current voice list. */
 function refreshVoices(): void {
   try {
     const voices = window.speechSynthesis.getVoices();
-    if (voices.length > 0) cachedJaVoice = pickJapaneseVoice(voices);
+    if (voices.length > 0) {
+      cachedJaVoice = pickJapaneseVoice(voices);
+      cachedEnVoice = pickEnglishVoice(voices);
+    }
   } catch {
     // ignore
   }
@@ -153,17 +185,27 @@ export function speak(
   if (!cleaned) return false;
   try {
     primeVoices();
-    if (!cachedJaVoice) refreshVoices(); // voices may have loaded since priming
+    if (!cachedJaVoice || !cachedEnVoice) refreshVoices(); // voices may have loaded since priming
     const utter = new SpeechSynthesisUtterance(cleaned.slice(0, 280));
-    // Default to Japanese so even when no explicit voice matches, the engine
-    // selects a JA-capable voice rather than reading kana/kanji as English.
-    utter.lang = 'ja-JP';
-    // A user-selected voice wins when available; otherwise fall back to the
-    // Japanese auto-pick (preserving the original default behavior).
-    const voice = findSelectedVoice() ?? cachedJaVoice;
-    if (voice) {
-      utter.voice = voice;
-      utter.lang = voice.lang;
+    if (isEnglishText(cleaned)) {
+      // English note: prefer an English browser voice; if none exists, fall back
+      // to just tagging the utterance en-US and letting the engine choose.
+      if (cachedEnVoice) {
+        utter.voice = cachedEnVoice;
+        utter.lang = cachedEnVoice.lang;
+      } else {
+        utter.lang = 'en-US';
+      }
+    } else {
+      // Non-English note: keep the Japanese baseline — the user-selected voice
+      // wins when set, otherwise the Japanese auto-pick. Default lang ja-JP so a
+      // missing voice still reads kana/kanji naturally rather than as English.
+      utter.lang = 'ja-JP';
+      const voice = findSelectedVoice() ?? cachedJaVoice;
+      if (voice) {
+        utter.voice = voice;
+        utter.lang = voice.lang;
+      }
     }
     utter.onstart = () => callbacks?.onStart?.();
     utter.onend = () => callbacks?.onEnd?.();
