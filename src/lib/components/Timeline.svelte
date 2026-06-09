@@ -1,6 +1,7 @@
 <script lang="ts">
   import { timeline } from '../timeline/store.svelte';
   import { shortNpub } from '../timeline/format';
+  import { getNoteImageUrl } from '../nostr/images';
   import type { ProfileMeta } from '../nostr/profiles';
   import type { Note } from '../nostr/types';
 
@@ -272,6 +273,18 @@
     return (nm ?? n.pubkey).slice(0, 1).toUpperCase();
   }
 
+  // The single image URL (if any) to preview for a note, used both inline in
+  // the card and in the full-text modal. See src/lib/nostr/images.ts.
+  function imageUrl(n: Note): string | null {
+    return getNoteImageUrl(n);
+  }
+
+  // Hide a broken note image so the card collapses back to text-only.
+  function onNoteImageError(e: Event): void {
+    const img = e.currentTarget as HTMLImageElement;
+    img.closest('.note-image')?.remove();
+  }
+
   // Hide a broken avatar image so the letter fallback (behind it) shows through.
   function onAvatarError(e: Event): void {
     (e.currentTarget as HTMLImageElement).style.display = 'none';
@@ -306,6 +319,7 @@
   {/if}
 
   {#each placed as p (p.note.id)}
+    {@const noteImg = imageUrl(p.note)}
     <div
       class="note"
       class:head={p.isHead}
@@ -341,6 +355,18 @@
         <span class="author">{name(p.note)}</span>
       </div>
       <span class="content">{p.note.content}</span>
+      {#if noteImg}
+        <span class="note-image">
+          <img
+            src={noteImg}
+            alt="Note attachment"
+            loading="lazy"
+            decoding="async"
+            referrerpolicy="no-referrer"
+            onerror={onNoteImageError}
+          />
+        </span>
+      {/if}
     </div>
   {/each}
 
@@ -385,6 +411,17 @@
       <div class="modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Full post text" onclick={(e) => e.stopPropagation()}>
         <div class="modal-head">{name(fullTextNote)}</div>
         <div class="modal-body">{fullTextNote.content}</div>
+        {#if imageUrl(fullTextNote)}
+          <a class="modal-image" href={imageUrl(fullTextNote)} target="_blank" rel="noreferrer noopener">
+            <img
+              src={imageUrl(fullTextNote)}
+              alt="Note attachment"
+              loading="lazy"
+              decoding="async"
+              referrerpolicy="no-referrer"
+            />
+          </a>
+        {/if}
         <button class="menu-item" type="button" onclick={() => (fullTextNote = null)}>Close</button>
       </div>
     </div>
@@ -534,6 +571,22 @@
     overflow: hidden;
   }
 
+  /* Inline image preview: a small thumbnail kept well within the card so the
+     lane layout stays stable. Capped height avoids giant images. */
+  .note-image {
+    display: block;
+    margin-top: 2px;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .note-image img {
+    display: block;
+    width: 100%;
+    max-height: 72px;
+    object-fit: cover;
+  }
+
   .note.head {
     background: var(--accent-bg);
     border-color: var(--accent-border);
@@ -660,5 +713,21 @@
     overflow-wrap: anywhere;
     overflow-y: auto;
     padding: 8px 4px;
+  }
+
+  /* Full-text modal image: larger preview, still capped so it never dominates
+     the dialog. Links out to the original in a new tab. */
+  .modal-image {
+    display: block;
+    margin: 4px 0;
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .modal-image img {
+    display: block;
+    width: 100%;
+    max-height: 320px;
+    object-fit: contain;
   }
 </style>
