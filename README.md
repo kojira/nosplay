@@ -39,8 +39,12 @@ This project was built to fulfill the [requirements document (要件書)](https:
   at a time, so a burst of incoming notes is read sequentially instead of only
   the latest one — and a note that sanitizes to nothing never blocks the notes
   behind it. Only notes that arrive **after** the live subscription starts are
-  spoken: reconnecting or reloading never replays the loaded history, and a
-  paused/seeked session stays silent until you return to LIVE.
+  spoken live: reconnecting or reloading never replays the loaded history.
+  When you rewind or seek into the past and **play through it**, TTS follows the
+  moving playhead instead — each note is read as it becomes the current one under
+  the playhead, through the same queue. A paused session stays silent until it is
+  playing (or LIVE); manually seeking/nudging or hitting **LIVE** resets the
+  speech state so a jump never replays a stale note or talks over a fresh one.
 - **Explicit NIP-07 login** — an account bar shows the login state (logged
   out / logging in / logged in / login error), the obtained pubkey (as a short
   npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login

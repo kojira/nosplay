@@ -139,6 +139,13 @@ export class TimelineStore {
    * on notes that arrive live afterwards.
    */
   #ttsLive = false;
+  /**
+   * Id of the note last spoken/queued from the playhead path (past playback),
+   * or null. Prevents re-speaking the same head note across the many frames it
+   * stays current. Reset on any manual seek/nudge/goLive/stop so a jump neither
+   * replays the old head nor gets suppressed by a stale marker.
+   */
+  #lastPlayheadSpokenId: string | null = null;
   /** Disposes the `voiceschanged` subscription. */
   #voicesStop: (() => void) | null = null;
   /** Authors of the current feed (follow list, or fallback authors in limited mode). */
@@ -607,6 +614,34 @@ export class TimelineStore {
     this.#drainTts();
   }
 
+  /**
+   * Speak the note currently at the playhead when playing through the past
+   * (paused-but-playing, i.e. not LIVE). This is the seek/rewind counterpart to
+   * #enqueueTts: instead of reacting to live arrivals, it reacts to the moving
+   * playhead and reads each note as it becomes the current head. The two paths
+   * are mutually exclusive (this requires !isLive, #enqueueTts requires isLive)
+   * so they never both push, and they share the same FIFO queue/drain machinery
+   * — preserving order and the speaking indicator.
+   *
+   * The #lastPlayheadSpokenId marker keeps a note from being re-spoken on every
+   * frame it remains the head; only a *change* of head enqueues new speech.
+   */
+  #speakPlayheadHead(): void {
+    if (!this.ttsEnabled || !hasTts()) return;
+    if (this.isLive) return; // live arrivals are handled by #enqueueTts
+    const head = this.headNote;
+    if (!head) return;
+    if (head.id === this.#lastPlayheadSpokenId) return;
+    this.#lastPlayheadSpokenId = head.id;
+    this.#ttsQueue.push({ id: head.id, text: head.content });
+    // Bound the backlog the same way live arrivals are bounded, so a fast
+    // playback speed crossing many notes can't build an unbounded queue.
+    if (this.#ttsQueue.length > TTS_QUEUE_MAX) {
+      this.#ttsQueue.splice(0, this.#ttsQueue.length - TTS_QUEUE_MAX);
+    }
+    this.#drainTts();
+  }
+
   /** Speak the next queued note, one utterance at a time. */
   #drainTts(): void {
     if (this.#ttsBusy) return;
@@ -648,6 +683,9 @@ export class TimelineStore {
     this.#ttsQueue = [];
     this.#ttsBusy = false;
     this.speakingId = null;
+    // Forget the playhead marker so a subsequent past-playback reads the head at
+    // the new position fresh, rather than skipping it as "already spoken".
+    this.#lastPlayheadSpokenId = null;
   }
 
   // ============================================================
@@ -688,6 +726,8 @@ export class TimelineStore {
         this.isLive = true;
       } else {
         this.playheadMs = next;
+        // Advancing through the past: speak the note that just became current.
+        this.#speakPlayheadHead();
       }
     }
   }
@@ -721,6 +761,9 @@ export class TimelineStore {
 
   /** Re-follow wall-clock now. */
   goLive(): void {
+    // Drop any past-playback speech (and its playhead marker) before jumping to
+    // the live edge, so a half-read past note doesn't talk over fresh arrivals.
+    this.#stopSpeech();
     this.isLive = true;
     this.isPlaying = true;
     this.playheadMs = Date.now();
