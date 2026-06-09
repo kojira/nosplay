@@ -31,6 +31,7 @@ import {
   createSceneModel,
   promptScene,
   type LanguageModelInstance,
+  type BackgroundScene,
 } from '../ai/prompt';
 
 export type Status = 'idle' | 'connecting' | 'live' | 'limited' | 'error';
@@ -58,6 +59,73 @@ export type AiBgStatus =
   | 'summarizing'
   | 'summary-empty'
   | 'error';
+
+/** How the last background SVG was produced. */
+export type AiRenderMode = 'scene' | 'deterministic' | 'none';
+
+/**
+ * Debug snapshot of the LAST summarization run, surfaced in the UI and logged to
+ * the console so it's obvious where a given AI background came from and why the
+ * feature is (or isn't) drawing. Purely diagnostic — never persisted, and reset
+ * when the feature is turned off. All times are epoch ms (0 = "never").
+ */
+export interface AiBgDebug {
+  /** Epoch ms of the last summarization attempt (success, empty, or skip). */
+  lastRunAt: number;
+  /** Epoch ms of the last run that actually produced a summary. */
+  lastSummaryAt: number;
+  /** Visible window edges at the last run: [start .. end] (playhead). */
+  windowStartMs: number;
+  windowEndMs: number;
+  /** Notes inside the visible window at the last run. */
+  visibleCount: number;
+  /** Notes actually fed to the summarizer (after the AI_MAX_NOTES cap). */
+  summarizedCount: number;
+  /** created_at span of the summarized slice (epoch ms), 0 when none. */
+  sliceStartMs: number;
+  sliceEndMs: number;
+  /** Characters of feed text fed to the summarizer. */
+  inputChars: number;
+  /** True when the feed text was clipped to the AI_MAX_CHARS budget. */
+  inputTruncated: boolean;
+  /** Characters of the resulting summary text. */
+  summaryChars: number;
+  /** Characters of the rendered SVG markup. */
+  svgChars: number;
+  /** Whether the SVG came from a Prompt-API scene or the deterministic path. */
+  renderMode: AiRenderMode;
+  /** The last scene the Prompt API returned, or null on the deterministic path. */
+  scene: BackgroundScene | null;
+  /** Whether the optional Prompt-API scene model is live this session. */
+  sceneModelReady: boolean;
+  /** True when there was too little text to summarize on the last run. */
+  notEnoughText: boolean;
+  /** Extra characters of feed text needed to clear AI_MIN_CHARS (0 when met). */
+  charsNeeded: number;
+}
+
+/** A fresh, empty debug snapshot (feature off / never run). */
+function emptyAiBgDebug(): AiBgDebug {
+  return {
+    lastRunAt: 0,
+    lastSummaryAt: 0,
+    windowStartMs: 0,
+    windowEndMs: 0,
+    visibleCount: 0,
+    summarizedCount: 0,
+    sliceStartMs: 0,
+    sliceEndMs: 0,
+    inputChars: 0,
+    inputTruncated: false,
+    summaryChars: 0,
+    svgChars: 0,
+    renderMode: 'none',
+    scene: null,
+    sceneModelReady: false,
+    notEnoughText: false,
+    charsNeeded: 0,
+  };
+}
 
 /** Explicit NIP-07 login lifecycle, surfaced in the UI. */
 export type LoginState = 'logged-out' | 'logging-in' | 'logged-in' | 'login-error';
@@ -131,6 +199,12 @@ export class TimelineStore {
   aiBgSummary = $state<string>('');
   /** SVG markup derived from aiBgSummary, rendered as the faint background. */
   aiBgSvg = $state<string>('');
+  /**
+   * Diagnostic snapshot of the last summarization run (source range, counts,
+   * char budget, render mode, scene). Surfaced in the AI debug panel and logged
+   * to the console. Runtime-only; reset when the feature is turned off.
+   */
+  aiBgDebug = $state<AiBgDebug>(emptyAiBgDebug());
 
   // ---- auth (NIP-07) ----
   loginState = $state<LoginState>('logged-out');
@@ -1182,8 +1256,11 @@ export class TimelineStore {
         return;
       }
       this.#langModel = model;
+      this.aiBgDebug = { ...this.aiBgDebug, sceneModelReady: true };
+      console.info('[nosplay/ai-bg] Prompt API scene model ready (structured scenes enabled)');
     } catch {
       this.#langModel = null; // optional; keep the deterministic path
+      console.info('[nosplay/ai-bg] Prompt API scene model unavailable — using deterministic SVG fallback');
     }
   }
 
@@ -1194,30 +1271,63 @@ export class TimelineStore {
    * failed / unparseable) falls back to the deterministic summary→SVG generator.
    * Always resolves to a usable SVG string.
    */
-  async #renderBackgroundSvg(summary: string): Promise<string> {
+  async #renderBackgroundSvg(
+    summary: string,
+  ): Promise<{ svg: string; mode: AiRenderMode; scene: BackgroundScene | null }> {
     if (this.#langModel) {
       try {
         const scene = await promptScene(this.#langModel, summary);
-        if (scene) return sceneToBackgroundSvg(scene, summary);
+        if (scene) {
+          return { svg: sceneToBackgroundSvg(scene, summary), mode: 'scene', scene };
+        }
       } catch {
         // fall through to the deterministic generator
       }
     }
-    return generateBackgroundSvg(summary);
+    return { svg: generateBackgroundSvg(summary), mode: 'deterministic', scene: null };
   }
 
-  /** Collect a trimmed, recent slice of visible note text for summarization. */
-  #collectVisibleText(): string {
+  /**
+   * Collect a trimmed, recent slice of visible note text for summarization,
+   * along with the metadata the debug panel needs: how many notes were visible
+   * vs actually used, the created_at span of the used slice, and whether the
+   * text was clipped to the char budget.
+   */
+  #collectVisibleSlice(): {
+    text: string;
+    visibleCount: number;
+    usedCount: number;
+    sliceStartMs: number;
+    sliceEndMs: number;
+    truncated: boolean;
+  } {
     const notes = this.visibleNotes;
-    if (notes.length === 0) return '';
+    const empty = {
+      text: '',
+      visibleCount: notes.length,
+      usedCount: 0,
+      sliceStartMs: 0,
+      sliceEndMs: 0,
+      truncated: false,
+    };
+    if (notes.length === 0) return empty;
     const recent = notes.slice(-AI_MAX_NOTES);
-    let text = recent
-      .map((n) => n.content.replace(/\s+/g, ' ').trim())
-      .filter(Boolean)
-      .join('\n');
+    const used = recent
+      .map((n) => ({ ms: n.created_at * 1000, text: n.content.replace(/\s+/g, ' ').trim() }))
+      .filter((n) => n.text.length > 0);
+    if (used.length === 0) return { ...empty, visibleCount: notes.length };
+    let text = used.map((n) => n.text).join('\n');
     // Keep the most recent tail if we're over the char budget.
-    if (text.length > AI_MAX_CHARS) text = text.slice(text.length - AI_MAX_CHARS);
-    return text;
+    const truncated = text.length > AI_MAX_CHARS;
+    if (truncated) text = text.slice(text.length - AI_MAX_CHARS);
+    return {
+      text,
+      visibleCount: notes.length,
+      usedCount: used.length,
+      sliceStartMs: used[0].ms,
+      sliceEndMs: used[used.length - 1].ms,
+      truncated,
+    };
   }
 
   /**
@@ -1229,39 +1339,109 @@ export class TimelineStore {
    */
   async #maybeSummarize(): Promise<void> {
     if (!this.aiBgEnabled || !this.#summarizer || this.#aiBusy) return;
-    const text = this.#collectVisibleText();
-    if (text.length < AI_MIN_CHARS) return; // not enough to summarize
-    if (text === this.#aiLastInput) return; // unchanged content
+    const slice = this.#collectVisibleSlice();
     const now = Date.now();
+    // Snapshot the source metadata on EVERY run (even ones we skip below) so the
+    // debug panel always reflects what the current window looks like.
+    const base: AiBgDebug = {
+      ...this.aiBgDebug,
+      lastRunAt: now,
+      windowStartMs: this.playheadMs - this.windowMs,
+      windowEndMs: this.playheadMs,
+      visibleCount: slice.visibleCount,
+      summarizedCount: slice.usedCount,
+      sliceStartMs: slice.sliceStartMs,
+      sliceEndMs: slice.sliceEndMs,
+      inputChars: slice.text.length,
+      inputTruncated: slice.truncated,
+      sceneModelReady: this.#langModel !== null,
+    };
+
+    if (slice.text.length < AI_MIN_CHARS) {
+      // Not enough text to summarize — make that explicit for the debug panel
+      // rather than failing silently.
+      this.aiBgDebug = {
+        ...base,
+        notEnoughText: true,
+        charsNeeded: AI_MIN_CHARS - slice.text.length,
+      };
+      return;
+    }
+    this.aiBgDebug = { ...base, notEnoughText: false, charsNeeded: 0 };
+
+    if (slice.text === this.#aiLastInput) return; // unchanged content
     if (now - this.#aiLastAt < AI_MIN_GAP_MS) return; // throttle churn
 
     this.#aiBusy = true;
     this.#aiLastAt = now;
-    this.#aiLastInput = text;
+    this.#aiLastInput = slice.text;
     const runId = this.#aiRunId;
     this.aiBgStatus = 'summarizing';
     try {
-      const summary = (await this.#summarizer.summarize(text)).trim();
+      const summary = (await this.#summarizer.summarize(slice.text)).trim();
       if (runId !== this.#aiRunId) return; // stopped/restarted meanwhile
       this.aiBgSummary = summary;
       if (!summary) {
         this.aiBgSvg = '';
         this.aiBgStatus = 'summary-empty';
+        this.aiBgDebug = {
+          ...this.aiBgDebug,
+          summaryChars: 0,
+          svgChars: 0,
+          renderMode: 'none',
+          scene: null,
+        };
       } else {
         // Optional Prompt-API scene enhancement, with deterministic fallback.
-        const svg = await this.#renderBackgroundSvg(summary);
+        const { svg, mode, scene } = await this.#renderBackgroundSvg(summary);
         if (runId !== this.#aiRunId) return; // stopped/restarted while rendering
         this.aiBgSvg = svg;
         this.aiBgStatus = 'ready';
+        this.aiBgDebug = {
+          ...this.aiBgDebug,
+          lastSummaryAt: Date.now(),
+          summaryChars: summary.length,
+          svgChars: svg.length,
+          renderMode: mode,
+          scene,
+        };
       }
-    } catch {
+      this.#logAiDebug();
+    } catch (err) {
       if (runId !== this.#aiRunId) return;
       this.aiBgStatus = 'error';
       // Allow a retry on the next change/heartbeat rather than wedging on this text.
       this.#aiLastInput = '';
+      console.warn('[nosplay/ai-bg] summarize/render failed', err);
     } finally {
       this.#aiBusy = false;
     }
+  }
+
+  /**
+   * Log a structured snapshot of the last AI background run to the console.
+   * Always on (not DEV-gated) — the whole point is to make the feature easy to
+   * inspect in any build, including the SVG/scene render result.
+   */
+  #logAiDebug(): void {
+    const d = this.aiBgDebug;
+    console.info('[nosplay/ai-bg]', {
+      status: this.aiBgStatus,
+      renderMode: d.renderMode,
+      sceneModelReady: d.sceneModelReady,
+      scene: d.scene,
+      visibleCount: d.visibleCount,
+      summarizedCount: d.summarizedCount,
+      inputChars: d.inputChars,
+      inputTruncated: d.inputTruncated,
+      summaryChars: d.summaryChars,
+      svgChars: d.svgChars,
+      windowMs: { start: d.windowStartMs, end: d.windowEndMs },
+      sliceMs: { start: d.sliceStartMs, end: d.sliceEndMs },
+      lastRunAt: d.lastRunAt,
+      lastSummaryAt: d.lastSummaryAt,
+      summary: this.aiBgSummary,
+    });
   }
 
   /** Stop the feature: tear down the session and clear all derived output. */
@@ -1272,6 +1452,7 @@ export class TimelineStore {
     this.aiBgProgress = 0;
     this.aiBgSummary = '';
     this.aiBgSvg = '';
+    this.aiBgDebug = emptyAiBgDebug();
     this.#aiLastInput = '';
     this.#aiLastAt = 0;
   }

@@ -75,6 +75,32 @@
     }
   });
 
+  // Diagnostic snapshot of the last summarization run, surfaced in a compact,
+  // collapsible debug panel so it's obvious where the current background came
+  // from (which slice was summarized, scene vs deterministic, char budgets…).
+  const aiDebug = $derived(timeline.aiBgDebug);
+  const aiHasRun = $derived(aiDebug.lastRunAt > 0);
+  const aiRenderLabel = $derived.by(() => {
+    switch (aiDebug.renderMode) {
+      case 'scene':
+        return `Prompt API scene${aiDebug.scene ? ` · ${aiDebug.scene.palette}` : ''}`;
+      case 'deterministic':
+        return aiDebug.sceneModelReady
+          ? 'deterministic (scene declined)'
+          : 'deterministic fallback';
+      default:
+        return aiDebug.sceneModelReady ? 'scene model ready' : 'no scene model';
+    }
+  });
+  const aiSliceLabel = $derived(
+    aiDebug.sliceStartMs > 0
+      ? `${hms(aiDebug.sliceStartMs)}–${hms(aiDebug.sliceEndMs)}`
+      : '—',
+  );
+  const aiWindowLabel = $derived(
+    aiHasRun ? `${hms(aiDebug.windowStartMs)}–${hms(aiDebug.windowEndMs)}` : '—',
+  );
+
   // ---- auth / follow / relay UI ---------------------------------------
   const loginLabel = $derived(
     {
@@ -479,6 +505,46 @@
       >
         {aiBgLabel}
       </div>
+
+      <details class="ai-debug">
+        <summary>AI debug — summary &amp; source range</summary>
+        <div class="ai-debug-body">
+          <div
+            class="ai-debug-summary"
+            class:placeholder={!timeline.aiBgSummary}
+          >
+            {#if timeline.aiBgSummary}
+              {timeline.aiBgSummary}
+            {:else if aiDebug.notEnoughText}
+              Not enough text to summarize yet — need ~{aiDebug.charsNeeded} more
+              characters of visible note text.
+            {:else if aiHasRun}
+              No summary produced yet.
+            {:else}
+              Waiting for the first summarization run…
+            {/if}
+          </div>
+          <dl class="ai-debug-meta">
+            <div><dt>source range</dt><dd>{aiSliceLabel}</dd></div>
+            <div><dt>window</dt><dd>{aiWindowLabel}</dd></div>
+            <div>
+              <dt>notes</dt>
+              <dd>{aiDebug.summarizedCount} summarized / {aiDebug.visibleCount} visible</dd>
+            </div>
+            <div>
+              <dt>input</dt>
+              <dd>{aiDebug.inputChars} chars{aiDebug.inputTruncated ? ' (truncated)' : ''}</dd>
+            </div>
+            <div><dt>summary</dt><dd>{aiDebug.summaryChars} chars</dd></div>
+            <div><dt>svg</dt><dd>{aiDebug.svgChars} chars</dd></div>
+            <div><dt>render</dt><dd>{aiRenderLabel}</dd></div>
+            <div>
+              <dt>last run</dt>
+              <dd>{aiHasRun ? hms(aiDebug.lastRunAt) : '—'}</dd>
+            </div>
+          </dl>
+        </div>
+      </details>
     {/if}
 
     <!-- composer at the very bottom -->
@@ -848,6 +914,64 @@
   }
   .ai-status.warn {
     color: #e0b341;
+  }
+
+  /* Compact, subtle diagnostic panel for the AI background. Collapsed by
+     default so it never competes with the timeline; expand to inspect. */
+  .ai-debug {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .ai-debug > summary {
+    cursor: pointer;
+    user-select: none;
+    opacity: 0.7;
+    list-style: revert;
+  }
+  .ai-debug > summary:hover {
+    opacity: 1;
+  }
+  .ai-debug-body {
+    margin-top: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .ai-debug-summary {
+    max-height: 4.5em;
+    overflow-y: auto;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+    line-height: 1.45;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .ai-debug-summary.placeholder {
+    color: var(--text-dim);
+    font-style: italic;
+  }
+  .ai-debug-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 2px 12px;
+    margin: 0;
+  }
+  .ai-debug-meta > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .ai-debug-meta dt {
+    opacity: 0.65;
+  }
+  .ai-debug-meta dd {
+    margin: 0;
+    text-align: right;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
 
   select,

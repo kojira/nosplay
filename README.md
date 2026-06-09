@@ -226,6 +226,29 @@ browser without the built-in AI Summarizer, the toggle still reflects your
 on/off choice but the status line clearly states it's **not supported**, no
 background is drawn, and nothing else in the app is affected.
 
+### Debugging & visibility
+
+Because the feature depends on browser-specific on-device models, it ships with
+explicit diagnostics so it's easy to see what it's doing (or why it isn't):
+
+- **AI debug panel** — when AI BG is on, a compact, collapsible *"AI debug —
+  summary & source range"* panel appears under the status line. It shows the
+  **actual summary text**, the **source range** that was summarized (the
+  `created_at` span of the slice and the visible window), how many notes were
+  **summarized vs visible**, the **input / summary / SVG char counts** (and
+  whether the input was truncated to the char budget), the **render mode**
+  (Prompt-API scene — with palette — vs deterministic fallback), and the time of
+  the **last run**. When there isn't enough text yet, it says so and reports how
+  many more characters are needed.
+- **Console logging** — every summarization run logs a structured
+  `[nosplay/ai-bg]` object to the browser console (status, render mode, scene
+  data, visible/summarized counts, char counts, window/slice timestamps, and the
+  summary itself), so SVG/scene generation results are always inspectable. Scene
+  model readiness and any summarize/render failures are logged too.
+
+All of this is **runtime-only diagnostics** (never persisted) and is cleared when
+the feature is toggled off.
+
 ### The Prompt API (optional enhancement)
 
 nosplay uses the **Summarizer API** as the **production base** for the text
