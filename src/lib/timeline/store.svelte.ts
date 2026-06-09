@@ -49,6 +49,7 @@ export type AiBgStatus =
   | 'downloading'
   | 'ready'
   | 'summarizing'
+  | 'summary-empty'
   | 'error';
 
 /** Explicit NIP-07 login lifecycle, surfaced in the UI. */
@@ -1153,11 +1154,16 @@ export class TimelineStore {
     const runId = this.#aiRunId;
     this.aiBgStatus = 'summarizing';
     try {
-      const summary = await this.#summarizer.summarize(text);
+      const summary = (await this.#summarizer.summarize(text)).trim();
       if (runId !== this.#aiRunId) return; // stopped/restarted meanwhile
       this.aiBgSummary = summary;
-      this.aiBgSvg = generateBackgroundSvg(summary);
-      this.aiBgStatus = 'ready';
+      if (!summary) {
+        this.aiBgSvg = '';
+        this.aiBgStatus = 'summary-empty';
+      } else {
+        this.aiBgSvg = generateBackgroundSvg(summary);
+        this.aiBgStatus = 'ready';
+      }
     } catch {
       if (runId !== this.#aiRunId) return;
       this.aiBgStatus = 'error';

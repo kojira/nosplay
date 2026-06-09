@@ -358,7 +358,7 @@
     position: absolute;
     inset: 0;
     z-index: 0;
-    opacity: 0.14;
+    opacity: 0.6;
     pointer-events: none;
     overflow: hidden;
     /* Ease summary swaps so the background doesn't pop when it updates. */

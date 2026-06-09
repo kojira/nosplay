@@ -66,6 +66,8 @@
           : 'AI background: ready — waiting for enough notes to summarize.';
       case 'summarizing':
         return 'AI background: summarizing the visible timeline…';
+      case 'summary-empty':
+        return 'AI background: summary came back empty — not enough distinct content to paint yet.';
       case 'error':
         return 'AI background: could not start. Click the toggle again to grant model access / retry.';
       default:

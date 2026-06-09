@@ -66,8 +66,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   text leaves your device, and there are **no mock/fake AI responses**. It
   updates on a ~30s heartbeat and on meaningful context change (notes entering /
   leaving the window), throttled so it never spams the model. A status line
-  always tells you what it's doing (downloading the model, summarizing, ready) or
-  why it's inactive (unsupported browser / model unavailable). The feature
+  always tells you what it's doing (downloading the model, summarizing, ready,
+  or that the summary came back empty when there isn't enough distinct content
+  to paint) or why it's inactive (unsupported browser / model unavailable). The feature
   degrades gracefully: in browsers without built-in AI the toggle still reflects
   your choice but clearly says it's unsupported, and the rest of the app is
   unaffected. See [AI summary background](#ai-summary-background).

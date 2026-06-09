@@ -79,7 +79,7 @@ export function generateBackgroundSvg(summary: string): string {
     const cy = Math.round(rand() * VIEW_H);
     const r = Math.round(120 + rand() * 220);
     const color = palette[Math.floor(rand() * palette.length)];
-    const op = (0.05 + rand() * 0.08).toFixed(3);
+    const op = (0.06 + rand() * 0.1).toFixed(3);
     parts.push(
       `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${color}" opacity="${op}"/>`,
     );
@@ -96,7 +96,7 @@ export function generateBackgroundSvg(summary: string): string {
   }
   const lineColor = palette[Math.floor(rand() * palette.length)];
   parts.push(
-    `<polyline points="${pts.join(' ')}" fill="none" stroke="${lineColor}" stroke-width="3" opacity="0.10" stroke-linejoin="round"/>`,
+    `<polyline points="${pts.join(' ')}" fill="none" stroke="${lineColor}" stroke-width="3" opacity="0.14" stroke-linejoin="round"/>`,
   );
 
   // Big faint phrases: the actual summary content, large and ghosted, laid out
@@ -107,7 +107,7 @@ export function generateBackgroundSvg(summary: string): string {
     const y = Math.round(VIEW_H * (0.22 + i * 0.16));
     const x = Math.round(40 + rand() * 80);
     const rot = (rand() * 6 - 3).toFixed(2);
-    const op = (0.16 - i * 0.02).toFixed(3);
+    const op = (0.2 - i * 0.025).toFixed(3);
     parts.push(
       `<text x="${x}" y="${y}" transform="rotate(${rot} ${x} ${y})" ` +
         `font-family="system-ui, sans-serif" font-weight="800" font-size="${size}" ` +
