@@ -12,6 +12,8 @@ export interface PlaybackState {
   windowMs: number;
   speed: number;
   ttsEnabled: boolean;
+  /** User-selected TTS voice (voiceURI), or null for the Japanese auto-pick. */
+  selectedVoiceURI: string | null;
   isLive: boolean;
   playheadMs: number;
   /** How manual relays combine with follow-derived ones ('auto' | 'merge' | 'manual'). */

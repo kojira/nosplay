@@ -27,11 +27,17 @@ export function sanitizeForSpeech(text: string): string {
 
 // ---- voice selection -------------------------------------------------------
 // Browsers populate the voice list asynchronously, so we cache it and refresh
-// on the `voiceschanged` event. We prefer a Japanese voice so CJK text is read
-// naturally rather than spelled out by a default (often English) voice.
+// on the `voiceschanged` event. By default we prefer a Japanese voice so CJK
+// text is read naturally rather than spelled out by a default (often English)
+// voice. The user may override this with an explicit voice (see selectedVoiceURI).
 
 let cachedJaVoice: SpeechSynthesisVoice | null = null;
 let voicesPrimed = false;
+
+// A user-selected voice, identified by its stable voiceURI. Null means "Auto"
+// (fall back to the Japanese auto-pick below). Stored as an id rather than a
+// SpeechSynthesisVoice reference because voice objects are recreated per call.
+let selectedVoiceURI: string | null = null;
 
 /** True when a voice's language tag denotes Japanese (`ja`, `ja-JP`, …). */
 function isJapanese(voice: SpeechSynthesisVoice): boolean {
@@ -71,6 +77,60 @@ function primeVoices(): void {
   }
 }
 
+/** The current list of available voices, priming the engine if needed. */
+export function listVoices(): SpeechSynthesisVoice[] {
+  if (!hasTts()) return [];
+  primeVoices();
+  try {
+    return window.speechSynthesis.getVoices();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Subscribe to voice-list changes (`voiceschanged`). Returns an unsubscribe
+ * function. Voices often arrive asynchronously, so callers use this to refresh
+ * their UI once the list populates.
+ */
+export function onVoicesChanged(cb: () => void): () => void {
+  if (!hasTts()) return () => {};
+  primeVoices();
+  try {
+    window.speechSynthesis.addEventListener?.('voiceschanged', cb);
+    return () => {
+      try {
+        window.speechSynthesis.removeEventListener?.('voiceschanged', cb);
+      } catch {
+        // ignore
+      }
+    };
+  } catch {
+    return () => {};
+  }
+}
+
+/**
+ * Set the user-selected voice by its voiceURI, or null to use the Japanese
+ * auto-pick. Unknown/unavailable ids simply fall back to the auto-pick at
+ * speak time, so this never throws.
+ */
+export function setSelectedVoiceURI(uri: string | null): void {
+  selectedVoiceURI = uri && uri.length > 0 ? uri : null;
+}
+
+/** Resolve the selected voiceURI to a live voice object, or null if gone. */
+function findSelectedVoice(): SpeechSynthesisVoice | null {
+  if (!selectedVoiceURI) return null;
+  try {
+    return (
+      window.speechSynthesis.getVoices().find((v) => v.voiceURI === selectedVoiceURI) ?? null
+    );
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Speak the given text if TTS is available. No-op otherwise.
  *
@@ -92,9 +152,12 @@ export function speak(
     // Default to Japanese so even when no explicit voice matches, the engine
     // selects a JA-capable voice rather than reading kana/kanji as English.
     utter.lang = 'ja-JP';
-    if (cachedJaVoice) {
-      utter.voice = cachedJaVoice;
-      utter.lang = cachedJaVoice.lang;
+    // A user-selected voice wins when available; otherwise fall back to the
+    // Japanese auto-pick (preserving the original default behavior).
+    const voice = findSelectedVoice() ?? cachedJaVoice;
+    if (voice) {
+      utter.voice = voice;
+      utter.lang = voice.lang;
     }
     utter.onstart = () => callbacks?.onStart?.();
     utter.onend = () => callbacks?.onEnd?.();

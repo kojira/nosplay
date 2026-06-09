@@ -19,12 +19,18 @@ no sample or fake posts.
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
   `datetime-local` jump to seek to any past moment within the loaded history.
 - **Text-to-speech** — optional read-aloud of new notes via the browser's
-  Web Speech API. A Japanese voice is selected when the browser offers one (and
-  the utterance language defaults to `ja-JP`) so CJK text is read naturally
-  rather than spelled out by a default English voice. URLs and Nostr identifiers
-  (npub/note/etc.) are stripped or replaced before speaking so they aren't read
-  aloud. The note currently being read aloud is highlighted in the timeline (a
-  pulsing outline plus a 🔊 badge) so you can see which post is speaking.
+  Web Speech API. A **Voice** selector next to the TTS toggle lets you pick any
+  voice the browser offers; the list populates asynchronously (via
+  `voiceschanged`) so it fills in even when voices load late. The default
+  **Auto (Japanese)** option keeps the original behavior: a Japanese voice is
+  selected when the browser offers one (and the utterance language defaults to
+  `ja-JP`) so CJK text is read naturally rather than spelled out by a default
+  English voice. Your choice is stored by its stable `voiceURI`, persists across
+  reloads, and falls back to Auto if that voice is no longer available. URLs and
+  Nostr identifiers (npub/note/etc.) are stripped or replaced before speaking so
+  they aren't read aloud. The note currently being read aloud is highlighted in
+  the timeline (a pulsing outline plus a 🔊 badge) so you can see which post is
+  speaking.
 - **Explicit NIP-07 login** — an account bar shows the login state (logged
   out / logging in / logged in / login error), the obtained pubkey (as a short
   npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login
@@ -37,9 +43,9 @@ no sample or fake posts.
 - **Relay settings** — inspect and edit the read relays the timeline fetches
   from, and choose how your manual list combines with the follow-derived one
   (see [Relays](#relays)).
-- **Persistence** — window size, speed, TTS toggle, a paused playhead position,
-  your relay settings (mode + manual list), and a "remember login" hint are
-  saved to IndexedDB and restored on reload. Once you have logged in at least
+- **Persistence** — window size, speed, TTS toggle, the selected TTS voice, a
+  paused playhead position, your relay settings (mode + manual list), and a
+  "remember login" hint are saved to IndexedDB and restored on reload. Once you have logged in at least
   once, the next session silently re-attempts NIP-07 login (most signers
   remember the granted permission, so this does not re-prompt); *Log out* clears
   the hint.

@@ -117,6 +117,16 @@
     if (Number.isFinite(ms) && ms > 0) timeline.windowMs = ms;
   }
 
+  /** A human label for a voice option, e.g. "Kyoko (ja-JP)". */
+  function voiceLabel(v: SpeechSynthesisVoice): string {
+    return `${v.name} (${v.lang})`;
+  }
+
+  function onVoiceChange(e: Event): void {
+    const v = (e.currentTarget as HTMLSelectElement).value;
+    timeline.setVoice(v === '' ? null : v);
+  }
+
   function onSeekInput(e: Event): void {
     timeline.seekTo(Number((e.currentTarget as HTMLInputElement).value));
   }
@@ -362,6 +372,19 @@
       </div>
 
       <div class="group right">
+        <label class="field">
+          <span>Voice</span>
+          <select
+            value={timeline.selectedVoiceURI ?? ''}
+            onchange={onVoiceChange}
+            title="Choose a TTS voice (Auto = Japanese)"
+          >
+            <option value="">Auto (Japanese)</option>
+            {#each timeline.availableVoices as v (v.voiceURI)}
+              <option value={v.voiceURI}>{voiceLabel(v)}</option>
+            {/each}
+          </select>
+        </label>
         <button
           class:active={timeline.ttsEnabled}
           onclick={() => timeline.toggleTts()}

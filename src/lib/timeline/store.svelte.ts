@@ -8,7 +8,14 @@ import { FALLBACK_RELAYS, FALLBACK_AUTHORS } from '../nostr/relays';
 import { resolveFollows } from '../nostr/follows';
 import { fetchProfiles, type ProfileMeta } from '../nostr/profiles';
 import { publishNote, hasNip07 } from '../nostr/post';
-import { speak, cancelSpeech, hasTts } from '../tts';
+import {
+  speak,
+  cancelSpeech,
+  hasTts,
+  listVoices,
+  onVoicesChanged,
+  setSelectedVoiceURI,
+} from '../tts';
 import { loadPlayback, savePlayback } from './persist';
 import type { Note } from '../nostr/types';
 
@@ -41,6 +48,10 @@ export class TimelineStore {
   mode = $state<Mode>('limited');
   canPost = $state<boolean>(false);
   ttsEnabled = $state<boolean>(false);
+  /** Available speechSynthesis voices, refreshed on `voiceschanged`. */
+  availableVoices = $state<SpeechSynthesisVoice[]>([]);
+  /** User-selected TTS voice (voiceURI), or null for the Japanese auto-pick. */
+  selectedVoiceURI = $state<string | null>(null);
   /** Id of the note currently being read aloud by TTS, or null. */
   speakingId = $state<string | null>(null);
   earliestMs = $state<number>(Date.now());
@@ -117,6 +128,8 @@ export class TimelineStore {
   #raf: number | null = null;
   #lastFrame = 0;
   #lastSpokenId: string | null = null;
+  /** Disposes the `voiceschanged` subscription. */
+  #voicesStop: (() => void) | null = null;
   /** Authors of the current feed (follow list, or fallback authors in limited mode). */
   #followAuthors: string[] = [];
   /** Remembered intent to auto-login on next connect (persisted). */
@@ -145,6 +158,7 @@ export class TimelineStore {
     }
     // Restore persisted settings/state before we start the live clock.
     await this.#initPersistence();
+    this.#initVoices();
     this.status = 'connecting';
     this.error = null;
     this.hasSigner = hasNip07();
@@ -333,6 +347,12 @@ export class TimelineStore {
       if (typeof saved.ttsEnabled === 'boolean') {
         this.ttsEnabled = saved.ttsEnabled;
       }
+      // Only a non-empty string overrides the default (null = Japanese auto-pick).
+      if (typeof saved.selectedVoiceURI === 'string' && saved.selectedVoiceURI) {
+        this.selectedVoiceURI = saved.selectedVoiceURI;
+      }
+      // Mirror the restored selection into the TTS module so speak() uses it.
+      setSelectedVoiceURI(this.selectedVoiceURI);
       if (saved.relayMode === 'auto' || saved.relayMode === 'merge' || saved.relayMode === 'manual') {
         this.relayMode = saved.relayMode;
       }
@@ -363,6 +383,7 @@ export class TimelineStore {
         void this.windowMs;
         void this.speed;
         void this.ttsEnabled;
+        void this.selectedVoiceURI;
         void this.isLive;
         void this.relayMode;
         void this.manualRelays;
@@ -388,6 +409,7 @@ export class TimelineStore {
       windowMs: this.windowMs,
       speed: this.speed,
       ttsEnabled: this.ttsEnabled,
+      selectedVoiceURI: this.selectedVoiceURI,
       isLive: this.isLive,
       // Only meaningful when paused; harmless otherwise since restore ignores
       // playheadMs unless isLive === false.
@@ -528,6 +550,24 @@ export class TimelineStore {
     await this.#loadNames(pks.slice(0, 200), this.activeReadRelays);
   }
 
+  /**
+   * Populate the voice list and keep it fresh as voices load asynchronously.
+   * Voices are deduped by voiceURI so they form stable, unique option keys.
+   */
+  #initVoices(): void {
+    if (this.#voicesStop) return;
+    const refresh = () => {
+      const seen = new Set<string>();
+      this.availableVoices = listVoices().filter((v) => {
+        if (seen.has(v.voiceURI)) return false;
+        seen.add(v.voiceURI);
+        return true;
+      });
+    };
+    refresh();
+    this.#voicesStop = onVoicesChanged(refresh);
+  }
+
   #maybeSpeakHead(): void {
     if (!this.ttsEnabled || !hasTts()) return;
     const head = this.headNote;
@@ -653,6 +693,13 @@ export class TimelineStore {
     else this.#lastSpokenId = this.headNote?.id ?? null;
   }
 
+  /** Choose a TTS voice by voiceURI, or null to use the Japanese auto-pick. */
+  setVoice(uri: string | null): void {
+    this.selectedVoiceURI = uri;
+    setSelectedVoiceURI(uri);
+    this.#scheduleSave();
+  }
+
   /** Publish a note via NIP-07; surfaces errors on this.error and rethrows. */
   async post(content: string): Promise<void> {
     this.error = null;
@@ -670,6 +717,10 @@ export class TimelineStore {
   disconnect(): void {
     this.stop();
     this.#stopSpeech();
+    if (this.#voicesStop) {
+      this.#voicesStop();
+      this.#voicesStop = null;
+    }
     // Flush a final save, then tear down the persistence effect.
     if (this.#saveTimer !== null) {
       clearTimeout(this.#saveTimer);
