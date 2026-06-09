@@ -19,23 +19,79 @@ no sample or fake posts.
 - **Text-to-speech** — optional read-aloud of new notes via the browser's
   Web Speech API. URLs and Nostr identifiers (npub/note/etc.) are stripped or
   replaced before speaking so they aren't read aloud.
+- **Explicit NIP-07 login** — an account bar shows the login state (logged
+  out / logging in / logged in / login error), the obtained pubkey (as a short
+  npub), and **Connect / Reconnect / Refresh follows / Log out** controls. Login
+  is explicit: nothing prompts your signer until you click *Connect* (a previous
+  session can opt into silent auto re-login — see *Persistence*).
 - **Posting** — compose and publish a note through a [NIP-07](https://github.com/nostr-protocol/nips/blob/master/07.md)
   browser extension (e.g. Alby, nos2x). The composer's *post-@* selector
   (current / playhead) only labels intent; posts always publish at the real
   current time.
-- **Persistence** — window size, speed, TTS toggle, and a paused playhead
-  position are saved to IndexedDB and restored on reload.
+- **Relay settings** — inspect and edit the read relays the timeline fetches
+  from, and choose how your manual list combines with the follow-derived one
+  (see [Relays](#relays)).
+- **Persistence** — window size, speed, TTS toggle, a paused playhead position,
+  your relay settings (mode + manual list), and a "remember login" hint are
+  saved to IndexedDB and restored on reload. Once you have logged in at least
+  once, the next session silently re-attempts NIP-07 login (most signers
+  remember the granted permission, so this does not re-prompt); *Log out* clears
+  the hint.
 
 ## Modes
 
-- **follows** — when a NIP-07 signer is present, nosplay resolves your
-  NIP-02 contact list and NIP-65 read relays and streams the people you follow.
-- **limited** — with no signer (or no follows), it streams a small set of
-  well-known public accounts plus a recent global feed so the timeline stays
-  lively.
+- **follows** — after you log in with a NIP-07 signer, nosplay resolves your
+  **NIP-02 contact list (kind:3)** and **NIP-65 relay list (kind:10002)** and
+  builds the timeline from the accounts you follow, read from your declared read
+  relays. The account bar explains exactly what was resolved ("Following N
+  accounts · timeline = people you follow").
+- **limited** — with no signer, before you log in, or when your account has no
+  contact list, it streams a small set of well-known public accounts plus a
+  recent global feed so the timeline stays lively. The account bar says why
+  ("No contact list (kind:3) found — showing the limited feed instead").
 
-The mode, connection status, and signing account are shown in the top-right
-status line.
+The mode, connection status, and right-edge time are shown in the top-right
+status line; the login state and pubkey are shown in the account bar below it.
+
+## Follow timeline (after login)
+
+When you click **Connect (NIP-07)**:
+
+1. nosplay calls `window.nostr.getPublicKey()` and shows the resulting pubkey.
+2. It fetches the newest **kind:10002** (NIP-65) event to learn your **read
+   relays**, and the newest **kind:3** (NIP-02) event to learn the **pubkeys you
+   follow**.
+3. If a contact list is found, the timeline switches to **follows** mode and
+   subscribes to `kind:1` notes from those authors on the resolved read relays.
+   If not, it stays in **limited** mode and tells you so.
+
+**Refresh follows** re-runs steps 2–3 (e.g. after you follow new accounts).
+**Reconnect** tears down and rebuilds the current feed with the current relay
+settings without re-resolving follows.
+
+## Relays
+
+The timeline reads from a set of **read relays**. Two sources feed that set:
+
+- **Follow-derived** — the read relays declared in your **NIP-65 (kind:10002)**
+  event, discovered automatically at login.
+- **Manual** — read relays you type into the **⚙ Relays** panel (one `wss://`
+  URL per line). Entries are trimmed, validated as `ws://`/`wss://`, and deduped.
+
+The **relay mode** decides how the two combine into the relays actually used
+(shown live as *Active now* in the panel):
+
+| Mode               | Effective read relays                                              |
+| ------------------ | ----------------------------------------------------------------- |
+| **Auto** (default) | Follow-derived relays only. Manual list is ignored for reads.     |
+| **Merge**          | Union of follow-derived **and** manual relays.                    |
+| **Manual**         | Manual relays only — a full **override** of the follow-derived list. |
+
+In every mode, if the chosen set is empty (e.g. *Auto* before login, or *Manual*
+with no URLs), nosplay falls back to a built-in list of well-known public relays
+so reads never go dark. Click **Apply & reconnect** to save the settings (they
+persist to IndexedDB) and rebuild the feed. Notes you post are published to the
+same active read-relay set.
 
 ## Develop
 

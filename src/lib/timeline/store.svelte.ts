@@ -4,11 +4,7 @@
 import type { Event } from 'nostr-tools';
 import type { SubCloser } from 'nostr-tools/pool';
 import { pool } from '../nostr/pool';
-import {
-  BOOTSTRAP_RELAYS,
-  FALLBACK_RELAYS,
-  FALLBACK_AUTHORS,
-} from '../nostr/relays';
+import { FALLBACK_RELAYS, FALLBACK_AUTHORS } from '../nostr/relays';
 import { resolveFollows } from '../nostr/follows';
 import { fetchProfiles, type ProfileMeta } from '../nostr/profiles';
 import { publishNote, hasNip07 } from '../nostr/post';
@@ -18,6 +14,15 @@ import type { Note } from '../nostr/types';
 
 export type Status = 'idle' | 'connecting' | 'live' | 'limited' | 'error';
 export type Mode = 'follows' | 'limited';
+
+/** Explicit NIP-07 login lifecycle, surfaced in the UI. */
+export type LoginState = 'logged-out' | 'logging-in' | 'logged-in' | 'login-error';
+
+/** How the manual read-relay list combines with the follow-derived (NIP-65) list. */
+export type RelayMode = 'auto' | 'merge' | 'manual';
+
+/** Lifecycle of the follow (kind:3 / kind:10002) resolution. */
+export type FollowStatus = 'idle' | 'resolving' | 'ready' | 'empty' | 'error';
 
 const MAX_NOTES = 5000;
 const DEFAULT_WINDOW_MS = 300_000; // 5 minutes
@@ -34,14 +39,61 @@ export class TimelineStore {
   speed = $state<number>(1);
   status = $state<Status>('idle');
   mode = $state<Mode>('limited');
-  account = $state<string | null>(null);
   canPost = $state<boolean>(false);
   ttsEnabled = $state<boolean>(false);
   earliestMs = $state<number>(Date.now());
   names = $state<Map<string, ProfileMeta>>(new Map());
   error = $state<string | null>(null);
 
+  // ---- auth (NIP-07) ----
+  loginState = $state<LoginState>('logged-out');
+  loginError = $state<string | null>(null);
+  /** Logged-in account pubkey (hex), or null when logged out. */
+  pubkey = $state<string | null>(null);
+  /** True once we know whether a NIP-07 signer (window.nostr) exists. */
+  hasSigner = $state<boolean>(false);
+
+  // ---- follows (kind:3 contacts + kind:10002 NIP-65 read relays) ----
+  followStatus = $state<FollowStatus>('idle');
+  /** Number of pubkeys in the logged-in account's kind:3 contact list. */
+  followCount = $state<number>(0);
+  /** Read relays declared by the account's kind:10002 (NIP-65) event. */
+  followReadRelays = $state<string[]>([]);
+
+  // ---- relay settings ----
+  /** User-entered read relays (manual override / merge source). */
+  manualRelays = $state<string[]>([]);
+  /** Strategy for combining follow-derived and manual relays. */
+  relayMode = $state<RelayMode>('auto');
+
   // ---- derived ----
+  /**
+   * The read relays actually used for history + live subscriptions, resolved
+   * from `relayMode`, the follow-derived NIP-65 list, and the manual list:
+   *  - auto   → follow-derived relays (fallback to defaults when none)
+   *  - merge  → union of follow-derived and manual
+   *  - manual → manual only (override)
+   * Any empty result falls back to FALLBACK_RELAYS so reads never go dark.
+   */
+  activeReadRelays = $derived.by<string[]>(() => {
+    const follow = this.followReadRelays;
+    const manual = this.manualRelays;
+    let relays: string[];
+    switch (this.relayMode) {
+      case 'manual':
+        relays = manual;
+        break;
+      case 'merge':
+        relays = uniq([...follow, ...manual]);
+        break;
+      case 'auto':
+      default:
+        relays = follow;
+        break;
+    }
+    return relays.length > 0 ? relays : FALLBACK_RELAYS;
+  });
+
   /** Notes whose created_at falls inside the visible window and at/behind the playhead. */
   visibleNotes = $derived(
     this.notes.filter((n) => {
@@ -62,8 +114,11 @@ export class TimelineStore {
   #subs: SubCloser[] = [];
   #raf: number | null = null;
   #lastFrame = 0;
-  #activeRelays: string[] = FALLBACK_RELAYS;
   #lastSpokenId: string | null = null;
+  /** Authors of the current feed (follow list, or fallback authors in limited mode). */
+  #followAuthors: string[] = [];
+  /** Remembered intent to auto-login on next connect (persisted). */
+  #rememberLogin = false;
 
   // ---- persistence (IndexedDB via persist.ts) ----
   #persistReady = false; // true once the saved state has been loaded/applied
@@ -71,9 +126,9 @@ export class TimelineStore {
   #saveTimer: ReturnType<typeof setTimeout> | null = null;
   #pendingPlayheadMs: number | null = null; // paused playhead awaiting history load
 
-  /** Relays to publish to (mirrors the active read/write relays in scope here). */
+  /** Relays to publish to (mirrors the active read relays in scope here). */
   get writeRelays(): string[] {
-    return this.#activeRelays;
+    return this.activeReadRelays;
   }
 
   // ============================================================
@@ -83,45 +138,145 @@ export class TimelineStore {
     if (this.status === 'connecting' || this.status === 'live' || this.status === 'limited') {
       return;
     }
-    // Restore persisted playback settings/state before we start the live clock.
+    // Restore persisted settings/state before we start the live clock.
     await this.#initPersistence();
     this.status = 'connecting';
     this.error = null;
+    this.hasSigner = hasNip07();
     this.canPost = hasNip07();
+    this.start();
 
-    let authors: string[] = [];
-    let relays: string[] = [];
+    // Auto re-login when the user was logged in last session and a signer is
+    // present. Most NIP-07 extensions remember the granted permission, so this
+    // does not re-prompt. The feed is built inside login(); on failure we fall
+    // through to the limited feed below.
+    if (this.#rememberLogin && hasNip07() && window.nostr) {
+      try {
+        await this.login();
+        return;
+      } catch {
+        // fall through to limited mode
+      }
+    }
 
-    // Attempt NIP-07 login + follow resolution.
+    this.mode = 'limited';
+    await this.#rebuildFeed();
+  }
+
+  /**
+   * Explicit NIP-07 login. Requests the public key from window.nostr, then
+   * resolves the follow list + read relays and switches to the follows feed.
+   * Surfaces progress on loginState / loginError; rethrows on failure.
+   */
+  async login(): Promise<void> {
+    if (!hasNip07() || !window.nostr) {
+      this.loginState = 'login-error';
+      this.loginError =
+        'No NIP-07 extension found. Install a signer (e.g. Alby, nos2x) and reload.';
+      throw new Error(this.loginError);
+    }
+    this.loginState = 'logging-in';
+    this.loginError = null;
     try {
-      if (hasNip07() && window.nostr) {
-        const pubkey = await window.nostr.getPublicKey();
-        this.account = pubkey;
-        const resolved = await resolveFollows(pubkey);
-        if (resolved.authors.length > 0) {
-          authors = resolved.authors;
-          relays = resolved.readRelays.length > 0 ? resolved.readRelays : FALLBACK_RELAYS;
-        }
+      const pubkey = await window.nostr.getPublicKey();
+      this.pubkey = pubkey;
+      this.loginState = 'logged-in';
+      this.hasSigner = true;
+      this.canPost = true;
+      this.#rememberLogin = true;
+      this.#scheduleSave();
+      await this.#resolveAndApplyFollows();
+    } catch (err) {
+      this.loginState = 'login-error';
+      this.loginError = err instanceof Error ? err.message : 'Login was refused or failed.';
+      throw err;
+    }
+  }
+
+  /** Forget the logged-in account and return to the limited (no-auth) feed. */
+  async logout(): Promise<void> {
+    this.pubkey = null;
+    this.loginState = 'logged-out';
+    this.loginError = null;
+    this.followStatus = 'idle';
+    this.followCount = 0;
+    this.followReadRelays = [];
+    this.#followAuthors = [];
+    this.mode = 'limited';
+    this.#rememberLogin = false;
+    this.#scheduleSave();
+    await this.#rebuildFeed();
+  }
+
+  /** Reconnect (tear down + rebuild) the current feed with current settings. */
+  async reconnect(): Promise<void> {
+    await this.#rebuildFeed();
+  }
+
+  /** Re-resolve the follow list + NIP-65 read relays for the logged-in account. */
+  async refreshFollows(): Promise<void> {
+    if (this.loginState !== 'logged-in' || !this.pubkey) return;
+    await this.#resolveAndApplyFollows();
+  }
+
+  /** Resolve kind:3 contacts + kind:10002 read relays, then rebuild the feed. */
+  async #resolveAndApplyFollows(): Promise<void> {
+    if (!this.pubkey) return;
+    this.followStatus = 'resolving';
+    try {
+      const resolved = await resolveFollows(this.pubkey);
+      this.followReadRelays = resolved.readRelays;
+      this.followCount = resolved.authors.length;
+      this.#followAuthors = resolved.authors;
+      if (resolved.authors.length > 0) {
+        this.mode = 'follows';
+        this.followStatus = 'ready';
+      } else {
+        // Logged in but no contacts found: stay in limited mode so the timeline
+        // still shows something, and tell the user why.
+        this.mode = 'limited';
+        this.#followAuthors = [];
+        this.followStatus = 'empty';
       }
     } catch {
-      // login refused / failed -> limited mode
-      this.account = this.account ?? null;
-    }
-
-    if (authors.length > 0) {
-      this.mode = 'follows';
-      this.#activeRelays = relays;
-    } else {
+      this.followStatus = 'error';
       this.mode = 'limited';
-      authors = FALLBACK_AUTHORS;
-      this.#activeRelays = FALLBACK_RELAYS;
-      relays = FALLBACK_RELAYS;
+      this.#followAuthors = [];
     }
+    await this.#rebuildFeed();
+  }
+
+  // ============================================================
+  // Relay settings
+  // ============================================================
+  /**
+   * Apply new relay settings from the UI and reconnect. `manual` is normalized
+   * (trimmed, ws(s):// only, deduped). The effective read relays then follow
+   * `activeReadRelays` and the rebuilt feed uses them immediately.
+   */
+  async setRelaySettings(mode: RelayMode, manual: string[]): Promise<void> {
+    this.relayMode = mode;
+    this.manualRelays = normalizeRelays(manual);
+    this.#scheduleSave();
+    await this.#rebuildFeed();
+  }
+
+  // ============================================================
+  // Feed (history + live subscription) build/teardown
+  // ============================================================
+  /** Tear down current subscriptions, clear notes, and (re)build the feed. */
+  async #rebuildFeed(): Promise<void> {
+    this.#closeSubs();
+    this.#clearNotes();
+    this.status = 'connecting';
+    this.error = null;
+
+    const authors = this.mode === 'follows' ? this.#followAuthors : FALLBACK_AUTHORS;
+    const relays = this.activeReadRelays;
 
     // Fire profile fetch (non-blocking).
     void this.#loadNames(authors, relays);
 
-    // History fetch (one-shot) + live subscription.
     try {
       await this.#fetchHistory(authors, relays);
       // Now that earliestMs reflects real history, clamp the restored playhead.
@@ -132,14 +287,31 @@ export class TimelineStore {
       this.status = 'error';
       this.error = 'Failed to connect to relays.';
     }
+  }
 
-    this.start();
+  #closeSubs(): void {
+    for (const sub of this.#subs) {
+      try {
+        sub.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.#subs = [];
+  }
+
+  /** Drop all loaded notes (used when the feed source changes). */
+  #clearNotes(): void {
+    this.notes = [];
+    this.#ids.clear();
+    this.earliestMs = Date.now();
+    this.#lastSpokenId = null;
   }
 
   // ============================================================
   // Persistence
   // ============================================================
-  /** Load saved playback state (once) and start saving on future changes. */
+  /** Load saved settings (once) and start saving on future changes. */
   async #initPersistence(): Promise<void> {
     if (this.#persistReady) return;
     this.#persistReady = true;
@@ -155,6 +327,15 @@ export class TimelineStore {
       }
       if (typeof saved.ttsEnabled === 'boolean') {
         this.ttsEnabled = saved.ttsEnabled;
+      }
+      if (saved.relayMode === 'auto' || saved.relayMode === 'merge' || saved.relayMode === 'manual') {
+        this.relayMode = saved.relayMode;
+      }
+      if (Array.isArray(saved.manualRelays)) {
+        this.manualRelays = normalizeRelays(saved.manualRelays);
+      }
+      if (typeof saved.rememberLogin === 'boolean') {
+        this.#rememberLogin = saved.rememberLogin;
       }
       // Playhead only restores when the last session was paused (not LIVE);
       // a live session reloads live, following wall-clock now. The actual
@@ -178,28 +359,38 @@ export class TimelineStore {
         void this.speed;
         void this.ttsEnabled;
         void this.isLive;
+        void this.relayMode;
+        void this.manualRelays;
         this.#scheduleSave();
       });
       return () => {};
     });
   }
 
-  /** Debounced best-effort save of the current playback slice. */
+  /** Debounced best-effort save of the current settings slice. */
   #scheduleSave(): void {
     if (!this.#persistReady) return;
     if (this.#saveTimer !== null) clearTimeout(this.#saveTimer);
     this.#saveTimer = setTimeout(() => {
       this.#saveTimer = null;
-      void savePlayback({
-        windowMs: this.windowMs,
-        speed: this.speed,
-        ttsEnabled: this.ttsEnabled,
-        isLive: this.isLive,
-        // Only meaningful when paused; harmless otherwise since restore ignores
-        // playheadMs unless isLive === false.
-        playheadMs: this.playheadMs,
-      });
+      void savePlayback(this.#snapshot());
     }, 400);
+  }
+
+  /** The slice of state we persist between sessions. */
+  #snapshot() {
+    return {
+      windowMs: this.windowMs,
+      speed: this.speed,
+      ttsEnabled: this.ttsEnabled,
+      isLive: this.isLive,
+      // Only meaningful when paused; harmless otherwise since restore ignores
+      // playheadMs unless isLive === false.
+      playheadMs: this.playheadMs,
+      relayMode: this.relayMode,
+      manualRelays: this.manualRelays,
+      rememberLogin: this.#rememberLogin,
+    };
   }
 
   /** Apply a restored paused playhead once real history (earliestMs) is known. */
@@ -434,27 +625,14 @@ export class TimelineStore {
       this.#saveTimer = null;
     }
     if (this.#persistReady) {
-      void savePlayback({
-        windowMs: this.windowMs,
-        speed: this.speed,
-        ttsEnabled: this.ttsEnabled,
-        isLive: this.isLive,
-        playheadMs: this.playheadMs,
-      });
+      void savePlayback(this.#snapshot());
     }
     if (this.#persistStop) {
       this.#persistStop();
       this.#persistStop = null;
     }
     this.#persistReady = false;
-    for (const sub of this.#subs) {
-      try {
-        sub.close();
-      } catch {
-        // ignore
-      }
-    }
-    this.#subs = [];
+    this.#closeSubs();
     if (this.status !== 'error') this.status = 'idle';
   }
 }
@@ -462,6 +640,27 @@ export class TimelineStore {
 function clamp(v: number, lo: number, hi: number): number {
   if (hi < lo) return lo;
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** Deduplicate while preserving order. */
+function uniq(list: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of list) {
+    if (!seen.has(v)) {
+      seen.add(v);
+      out.push(v);
+    }
+  }
+  return out;
+}
+
+/** Trim, keep only ws:// / wss:// URLs, drop trailing slashes, dedupe. */
+function normalizeRelays(list: string[]): string[] {
+  const cleaned = list
+    .map((s) => s.trim().replace(/\/+$/, ''))
+    .filter((s) => /^wss?:\/\/.+/i.test(s));
+  return uniq(cleaned);
 }
 
 // The singleton UI state source. Importing this does NOT open sockets.

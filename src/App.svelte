@@ -3,7 +3,8 @@
   import Timeline from './lib/components/Timeline.svelte';
   import TimeAxis from './lib/components/TimeAxis.svelte';
   import { timeline } from './lib/timeline/store.svelte';
-  import { hms } from './lib/timeline/format';
+  import { hms, shortNpub } from './lib/timeline/format';
+  import type { RelayMode } from './lib/timeline/store.svelte';
 
   // ---- local UI state --------------------------------------------------
   // A ticking "now" used for the seek slider max and the datetime-local max.
@@ -42,6 +43,58 @@
   );
   // window.nostr availability is reflected by canPost (set during connect()).
   const canPost = $derived(timeline.canPost);
+
+  // ---- auth / follow / relay UI ---------------------------------------
+  const loginLabel = $derived(
+    {
+      'logged-out': 'logged out',
+      'logging-in': 'logging in…',
+      'logged-in': 'logged in',
+      'login-error': 'login error',
+    }[timeline.loginState],
+  );
+
+  // A human explanation of how the current follow timeline was derived.
+  const followExplain = $derived.by(() => {
+    switch (timeline.followStatus) {
+      case 'resolving':
+        return 'Resolving your follows (kind:3) and read relays (kind:10002)…';
+      case 'ready':
+        return `Following ${timeline.followCount} accounts · timeline = people you follow.`;
+      case 'empty':
+        return 'No contact list (kind:3) found for this account — showing the limited feed instead.';
+      case 'error':
+        return 'Could not resolve your follows — showing the limited feed instead.';
+      default:
+        return 'Connect a NIP-07 signer to build a timeline from the accounts you follow.';
+    }
+  });
+
+  // Relay settings panel (collapsible) + edit drafts.
+  let showRelays = $state(false);
+  let relayModeDraft = $state<RelayMode>(timeline.relayMode);
+  let manualRelaysDraft = $state('');
+
+  async function onLogin(): Promise<void> {
+    try {
+      await timeline.login();
+    } catch {
+      // loginError is surfaced in the account bar.
+    }
+  }
+
+  function openRelays(): void {
+    // Seed the editor from the live store each time it opens.
+    relayModeDraft = timeline.relayMode;
+    manualRelaysDraft = timeline.manualRelays.join('\n');
+    showRelays = !showRelays;
+  }
+
+  async function applyRelays(): Promise<void> {
+    const list = manualRelaysDraft.split('\n');
+    await timeline.setRelaySettings(relayModeDraft, list);
+    showRelays = false;
+  }
 
   // ---- helpers ---------------------------------------------------------
   /** epoch-ms -> value string for <input type="datetime-local"> (local time). */
@@ -130,6 +183,110 @@
       </span>
     </div>
   </header>
+
+  <!-- Account / NIP-07 login + follow timeline + relay settings -->
+  <section class="account-bar" aria-label="Account and relays">
+    <div class="acct-row">
+      <div class="acct-login" data-login={timeline.loginState}>
+        <span class="dot" data-login={timeline.loginState}></span>
+        <span class="acct-label">NIP-07: {loginLabel}</span>
+        {#if timeline.pubkey}
+          <span class="pubkey" title={timeline.pubkey}>{shortNpub(timeline.pubkey)}</span>
+        {/if}
+      </div>
+
+      <div class="acct-actions">
+        {#if timeline.loginState === 'logged-in'}
+          <button onclick={() => timeline.refreshFollows()} title="Re-fetch kind:3 + kind:10002">
+            ↻ Refresh follows
+          </button>
+          <button onclick={() => timeline.reconnect()} title="Reconnect to relays">
+            ⟳ Reconnect
+          </button>
+          <button onclick={() => timeline.logout()}>Log out</button>
+        {:else}
+          <button
+            class="primary"
+            onclick={onLogin}
+            disabled={timeline.loginState === 'logging-in'}
+          >
+            {timeline.loginState === 'logging-in'
+              ? 'Connecting…'
+              : timeline.loginState === 'login-error'
+                ? 'Retry login'
+                : 'Connect (NIP-07)'}
+          </button>
+        {/if}
+        <button class:active={showRelays} onclick={openRelays} title="Read relay settings">
+          ⚙ Relays ({timeline.activeReadRelays.length})
+        </button>
+      </div>
+    </div>
+
+    <div class="acct-explain">{followExplain}</div>
+
+    {#if timeline.loginError}
+      <div class="acct-error" role="alert">Login error: {timeline.loginError}</div>
+    {/if}
+
+    {#if showRelays}
+      <div class="relay-panel">
+        <p class="relay-help">
+          Read relays decide where notes are fetched from. Choose how your
+          <strong>follow-derived</strong> list (NIP-65 kind:10002) and your
+          <strong>manual</strong> list combine:
+        </p>
+        <div class="relay-modes">
+          <label>
+            <input type="radio" value="auto" bind:group={relayModeDraft} />
+            <span><strong>Auto</strong> — use follow-derived relays (fallback to defaults)</span>
+          </label>
+          <label>
+            <input type="radio" value="merge" bind:group={relayModeDraft} />
+            <span><strong>Merge</strong> — follow-derived ∪ manual</span>
+          </label>
+          <label>
+            <input type="radio" value="manual" bind:group={relayModeDraft} />
+            <span><strong>Manual</strong> — manual list only (override)</span>
+          </label>
+        </div>
+
+        <label class="relay-field">
+          <span>Manual read relays (one wss:// URL per line)</span>
+          <textarea
+            class="relay-input"
+            bind:value={manualRelaysDraft}
+            rows="4"
+            placeholder={'wss://relay.example.com\nwss://relay.damus.io'}
+          ></textarea>
+        </label>
+
+        <div class="relay-lists">
+          <div>
+            <span class="relay-lab">Follow-derived (kind:10002):</span>
+            {#if timeline.followReadRelays.length > 0}
+              <ul>
+                {#each timeline.followReadRelays as r (r)}<li>{r}</li>{/each}
+              </ul>
+            {:else}
+              <span class="relay-none">none</span>
+            {/if}
+          </div>
+          <div>
+            <span class="relay-lab">Active now ({timeline.activeReadRelays.length}):</span>
+            <ul>
+              {#each timeline.activeReadRelays as r (r)}<li>{r}</li>{/each}
+            </ul>
+          </div>
+        </div>
+
+        <div class="relay-actions">
+          <button class="primary" onclick={applyRelays}>Apply &amp; reconnect</button>
+          <button onclick={() => (showRelays = false)}>Close</button>
+        </div>
+      </div>
+    {/if}
+  </section>
 
   {#if timeline.error}
     <div class="banner" role="alert">{timeline.error}</div>
@@ -328,6 +485,149 @@
     border-bottom: 1px solid var(--live);
     color: var(--live);
     font-size: 13px;
+  }
+
+  /* ---- account / login / relay bar ---- */
+  .account-bar {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .acct-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .acct-login {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    color: var(--text-dim);
+  }
+  .acct-login .acct-label {
+    color: var(--text-h);
+  }
+  .acct-login .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-dim);
+  }
+  .acct-login .dot[data-login='logged-in'] {
+    background: var(--ok);
+    box-shadow: 0 0 6px var(--ok);
+  }
+  .acct-login .dot[data-login='logging-in'] {
+    background: #e0b341;
+  }
+  .acct-login .dot[data-login='login-error'] {
+    background: var(--live);
+  }
+  .pubkey {
+    color: var(--accent);
+    font-family: var(--mono);
+  }
+  .acct-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .acct-actions button {
+    font-size: 12px;
+  }
+  .acct-actions button.active {
+    border-color: var(--accent-border);
+    color: var(--accent);
+  }
+  .acct-explain {
+    color: var(--text-dim);
+    line-height: 1.4;
+  }
+  .acct-error {
+    color: var(--live);
+    line-height: 1.4;
+  }
+
+  .relay-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 4px;
+    padding: 12px;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .relay-help {
+    margin: 0;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+  .relay-modes {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .relay-modes label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text);
+    cursor: pointer;
+  }
+  .relay-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: var(--text-dim);
+  }
+  .relay-input {
+    resize: vertical;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    color: var(--text-h);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .relay-input:focus {
+    outline: none;
+    border-color: var(--accent-border);
+  }
+  .relay-lists {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .relay-lists .relay-lab {
+    color: var(--text-h);
+    font-weight: 600;
+  }
+  .relay-lists ul {
+    margin: 4px 0 0;
+    padding-left: 16px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    line-height: 1.5;
+  }
+  .relay-none {
+    color: var(--text-dim);
+    margin-left: 6px;
+  }
+  .relay-actions {
+    display: flex;
+    gap: 8px;
   }
 
   .controls {

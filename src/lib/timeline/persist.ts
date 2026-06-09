@@ -14,6 +14,12 @@ export interface PlaybackState {
   ttsEnabled: boolean;
   isLive: boolean;
   playheadMs: number;
+  /** How manual relays combine with follow-derived ones ('auto' | 'merge' | 'manual'). */
+  relayMode: 'auto' | 'merge' | 'manual';
+  /** User-entered read relays (manual override / merge source). */
+  manualRelays: string[];
+  /** Whether to auto re-login via NIP-07 on the next session. */
+  rememberLogin: boolean;
 }
 
 let dbp: Promise<IDBPDatabase> | null = null;
