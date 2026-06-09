@@ -1,6 +1,7 @@
 // THE SINGLE SOURCE OF UI STATE for nosplay.
 // A Svelte 5 runes module exporting a singleton `timeline`.
 // Constructing the singleton opens NO sockets; call connect() (e.g. onMount).
+import { untrack } from 'svelte';
 import type { Event } from 'nostr-tools';
 import type { SubCloser } from 'nostr-tools/pool';
 import { pool } from '../nostr/pool';
@@ -1226,7 +1227,14 @@ export class TimelineStore {
     this.#aiEffectStop = $effect.root(() => {
       $effect(() => {
         void this.aiContextSig; // track; act on change
-        if (this.#summarizer) void this.#maybeSummarize();
+        // #maybeSummarize() reads reactive state (aiBgDebug, visibleNotes,
+        // playheadMs, windowMs) and then WRITES aiBgDebug. In Svelte runes,
+        // reads inside a function called from an effect are tracked by that
+        // effect, so without untrack the write to aiBgDebug would re-trigger
+        // this effect → a self-sustaining loop (effect_update_depth_exceeded).
+        // We only want to react to aiContextSig changes, so run the call
+        // untracked: its internal reads/writes don't become dependencies.
+        if (this.#summarizer) untrack(() => void this.#maybeSummarize());
       });
       return () => {};
     });
