@@ -309,11 +309,23 @@ Prompt API / Gemini Nano return an SVG string from a short text prompt?** It
 reuses the real `src/lib/ai/prompt.ts` and `src/lib/ai/sanitize.ts` helpers (no
 mocks) and is separate from the app — it touches no product logic.
 
-Steps:
+It is **not** a standalone file — open it through a Vite server (opening the
+`.html` via `file://` will not load the TypeScript module). Use one of:
+
+**Dev (recommended):**
 
 1. `npm run dev`
-2. Open **http://localhost:5173/svg-smoke.html** (dev base is `/`).
+2. Open **http://localhost:5173/svg-smoke.html**
 3. Click **Run**.
+
+**Preview the production build:**
+
+1. `npm run build`
+2. `npm run preview`
+3. Open **http://localhost:4173/svg-smoke.html** — local builds use a base of
+   `/`, so assets resolve at the server root and the preview is fully usable.
+   (GitHub Pages deploys set `BASE_PATH=/nosplay/`; see *Deploy*.)
+4. Click **Run**.
 
 **Browser-only:** it must run in a **Chrome build with the Prompt API / Gemini
 Nano enabled** (see *AI summary background → Requirements*). It **cannot run in

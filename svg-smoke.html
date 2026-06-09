@@ -76,6 +76,18 @@
         width: 100%;
         height: 100%;
       }
+      .launch-note {
+        background: #1b2330;
+        border: 1px solid #35506b;
+        border-radius: 4px;
+        padding: 0.75rem;
+        font-size: 0.85rem;
+      }
+      .launch-note code {
+        background: #0c1118;
+        padding: 0.05rem 0.3rem;
+        border-radius: 3px;
+      }
     </style>
   </head>
   <body>
@@ -84,6 +96,14 @@
       Asks the on-device Prompt API to return an SVG from a short prompt, then
       shows the RAW model output and the strict validation result. Browser-only:
       requires a Chrome build with the Prompt API / Gemini Nano enabled.
+    </p>
+    <p class="launch-note">
+      Open this page through a Vite server, not as a <code>file://</code> — the
+      TypeScript module below only loads when served. Dev:
+      <code>npm run dev</code> →
+      <code>http://localhost:5173/svg-smoke.html</code>. Preview:
+      <code>npm run build &amp;&amp; npm run preview</code> →
+      <code>http://localhost:4173/svg-smoke.html</code>.
     </p>
 
     <div class="row">

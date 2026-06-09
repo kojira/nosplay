@@ -4,10 +4,11 @@ import { resolve } from 'node:path'
 
 // https://vite.dev/config/
 // On GitHub Pages a project site is served from https://<user>.github.io/<repo>/,
-// so production builds need a base of '/<repo>/'. The deploy workflow sets
-// BASE_PATH; locally `vite dev`/`vite preview` fall back to '/'.
-export default defineConfig(({ command }) => ({
-  base: process.env.BASE_PATH ?? (command === 'build' ? '/nosplay/' : '/'),
+// so the deploy workflow sets BASE_PATH='/nosplay/' for production builds.
+// Everything else (dev, local `vite build` + `vite preview`) falls back to '/'
+// so assets resolve at the server root and previews are genuinely usable.
+export default defineConfig(() => ({
+  base: process.env.BASE_PATH ?? '/',
   plugins: [svelte()],
   build: {
     rollupOptions: {
