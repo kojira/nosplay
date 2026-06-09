@@ -24,7 +24,14 @@ import {
   createSummarizer,
   type SummarizerInstance,
 } from '../ai/summarizer';
-import { generateBackgroundSvg } from '../ai/svg';
+import { generateBackgroundSvg, sceneToBackgroundSvg } from '../ai/svg';
+import {
+  isLanguageModelSupported,
+  languageModelAvailability,
+  createSceneModel,
+  promptScene,
+  type LanguageModelInstance,
+} from '../ai/prompt';
 
 export type Status = 'idle' | 'connecting' | 'live' | 'limited' | 'error';
 export type Mode = 'follows' | 'limited';
@@ -242,6 +249,14 @@ export class TimelineStore {
   // ---- AI summary background (non-reactive) ----
   /** Active Summarizer session (Gemini Nano), or null when not running. */
   #summarizer: SummarizerInstance | null = null;
+  /**
+   * Optional Prompt API (LanguageModel / Gemini Nano) session used to generate
+   * a STRUCTURED scene for the background, or null when the Prompt API is
+   * unavailable. Pure enhancement over the Summarizer base: when present we ask
+   * it for a scene and render that; on any failure we fall back to the
+   * deterministic summary→SVG generator.
+   */
+  #langModel: LanguageModelInstance | null = null;
   /** Heartbeat interval handle for periodic re-summarization. */
   #aiTimer: ReturnType<typeof setInterval> | null = null;
   /** Disposes the $effect that reacts to context changes. */
@@ -1119,6 +1134,9 @@ export class TimelineStore {
       this.#summarizer = summarizer;
       this.aiBgStatus = 'ready';
       this.aiBgProgress = 1;
+      // Best-effort, non-blocking: bring up the optional Prompt API session so
+      // structured scenes can enhance the background. Never gates 'ready'.
+      void this.#initSceneModel(runId);
     } catch {
       if (runId !== this.#aiRunId) return;
       // create() refused — most often a missing user gesture for the download,
@@ -1138,6 +1156,54 @@ export class TimelineStore {
       });
       return () => {};
     });
+  }
+
+  /**
+   * Best-effort: bring up the optional Prompt API (LanguageModel) session used
+   * to generate a STRUCTURED scene for the background. This is a pure
+   * enhancement — we only create it when the on-device model is already
+   * 'available' (so we never force a separate model download), and any failure
+   * just leaves us on the deterministic summary→SVG path. Never touches
+   * aiBgStatus, so the UI stays quiet about it.
+   */
+  async #initSceneModel(runId: number): Promise<void> {
+    if (!isLanguageModelSupported()) return;
+    try {
+      const avail = await languageModelAvailability();
+      if (runId !== this.#aiRunId) return; // toggled off while awaiting
+      if (avail !== 'available') return; // don't trigger a model download here
+      const model = await createSceneModel();
+      if (runId !== this.#aiRunId) {
+        try {
+          model.destroy();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      this.#langModel = model;
+    } catch {
+      this.#langModel = null; // optional; keep the deterministic path
+    }
+  }
+
+  /**
+   * Turn a summary into the background SVG. Prefers an AI-described STRUCTURED
+   * scene via the optional Prompt API (Gemini Nano) when a session exists and it
+   * returns a valid scene; otherwise (unsupported / create failed / prompt
+   * failed / unparseable) falls back to the deterministic summary→SVG generator.
+   * Always resolves to a usable SVG string.
+   */
+  async #renderBackgroundSvg(summary: string): Promise<string> {
+    if (this.#langModel) {
+      try {
+        const scene = await promptScene(this.#langModel, summary);
+        if (scene) return sceneToBackgroundSvg(scene, summary);
+      } catch {
+        // fall through to the deterministic generator
+      }
+    }
+    return generateBackgroundSvg(summary);
   }
 
   /** Collect a trimmed, recent slice of visible note text for summarization. */
@@ -1182,7 +1248,10 @@ export class TimelineStore {
         this.aiBgSvg = '';
         this.aiBgStatus = 'summary-empty';
       } else {
-        this.aiBgSvg = generateBackgroundSvg(summary);
+        // Optional Prompt-API scene enhancement, with deterministic fallback.
+        const svg = await this.#renderBackgroundSvg(summary);
+        if (runId !== this.#aiRunId) return; // stopped/restarted while rendering
+        this.aiBgSvg = svg;
         this.aiBgStatus = 'ready';
       }
     } catch {
@@ -1224,6 +1293,14 @@ export class TimelineStore {
         // ignore
       }
       this.#summarizer = null;
+    }
+    if (this.#langModel) {
+      try {
+        this.#langModel.destroy();
+      } catch {
+        // ignore
+      }
+      this.#langModel = null;
     }
     this.#aiBusy = false;
   }
