@@ -1529,7 +1529,10 @@ export class TimelineStore {
    * inspect in any build. The headline line answers the only question that
    * matters at a glance — "is SVG generation working?" — as a literal YES/NO,
    * and the attached object groups the supporting evidence (generation, DOM
-   * insertion + layering, source slice) so a NO is self-explanatory.
+   * insertion + layering, source slice) so a NO is self-explanatory. The full
+   * generated SVG markup rides along under `svg` so it can be copied straight
+   * out of the console — kept inside the same object (not a separate log) so the
+   * output stays a single collapsible group rather than a wall of lines.
    *
    * Called from reportAiBgDom() (the DOM-verification phase) so the logged
    * `dom` fields reflect the SVG that was actually measured on the page, not a
@@ -1574,6 +1577,9 @@ export class TimelineStore {
         lastRunAt: d.lastRunAt,
         lastSummaryAt: d.lastSummaryAt,
         summary: this.aiBgSummary,
+        // Full generated markup, alongside generation.svgChars (its length), so
+        // the exact SVG can be inspected/copied from the console.
+        svg: this.aiBgSvg,
       },
     );
   }
