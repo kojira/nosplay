@@ -8,6 +8,8 @@ recent past like a media player — hence *nos·play*.
 Everything is real: notes are fetched live from public Nostr relays. There are
 no sample or fake posts.
 
+This project was built to fulfill the [requirements document (要件書)](https://github.com/TsukemonoGit/nosplay/blob/main/docs/%E8%A6%81%E4%BB%B6%E6%9B%B8.md).
+
 ## Features
 
 - **Live timeline** — kind:1 notes laid out by time across the full screen,
