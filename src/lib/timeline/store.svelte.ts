@@ -141,8 +141,14 @@ export class TimelineStore {
   #subs: SubCloser[] = [];
   #raf: number | null = null;
   #lastFrame = 0;
-  /** FIFO queue of live arrivals awaiting speech, drained one at a time. */
-  #ttsQueue: { id: string; text: string }[] = [];
+  /**
+   * FIFO queue of notes awaiting speech, drained one at a time. Each entry
+   * carries its author (pubkey) so mute can be re-checked at drain time, not
+   * only when the note was enqueued.
+   */
+  #ttsQueue: { id: string; pubkey: string; text: string }[] = [];
+  /** The note currently in flight (set at drain, cleared on finish), or null. */
+  #current: { id: string; pubkey: string } | null = null;
   /** True while an utterance is in flight (between speak() and its end/error). */
   #ttsBusy = false;
   /**
@@ -628,7 +634,7 @@ export class TimelineStore {
     if (!this.ttsEnabled || !hasTts()) return;
     if (!this.#ttsLive || !this.isLive) return;
     if (this.mutedPubkeys.has(note.pubkey)) return; // permanently muted author
-    this.#ttsQueue.push({ id: note.id, text: note.content });
+    this.#ttsQueue.push({ id: note.id, pubkey: note.pubkey, text: note.content });
     // Bound the backlog: during a flood, reading every note would lag far
     // behind the timeline, so keep only the most recent arrivals.
     if (this.#ttsQueue.length > TTS_QUEUE_MAX) {
@@ -659,7 +665,7 @@ export class TimelineStore {
     // an already-passed note suddenly speak.
     this.#lastPlayheadSpokenId = head.id;
     if (this.mutedPubkeys.has(head.pubkey)) return; // permanently muted author
-    this.#ttsQueue.push({ id: head.id, text: head.content });
+    this.#ttsQueue.push({ id: head.id, pubkey: head.pubkey, text: head.content });
     // Bound the backlog the same way live arrivals are bounded, so a fast
     // playback speed crossing many notes can't build an unbounded queue.
     if (this.#ttsQueue.length > TTS_QUEUE_MAX) {
@@ -671,9 +677,15 @@ export class TimelineStore {
   /** Speak the next queued note, one utterance at a time. */
   #drainTts(): void {
     if (this.#ttsBusy) return;
-    const next = this.#ttsQueue.shift();
+    // Re-check mute at drain time: an author muted after a note was queued must
+    // still be silenced, so skip (drop) any queued notes now from muted authors.
+    let next = this.#ttsQueue.shift();
+    while (next && this.mutedPubkeys.has(next.pubkey)) {
+      next = this.#ttsQueue.shift();
+    }
     if (!next) return;
     this.#ttsBusy = true;
+    this.#current = next;
     const started = speak(next.text, {
       onStart: () => {
         this.speakingId = next.id;
@@ -687,14 +699,18 @@ export class TimelineStore {
     // unspeakable note no longer blocks the notes queued behind it.
     if (!started) {
       this.#ttsBusy = false;
+      this.#current = null;
       this.#drainTts();
     }
   }
 
   /** Mark the current utterance done and move on to the next queued note. */
   #finishTts(id: string): void {
-    // Guard the clear so a stale callback for an old note doesn't wipe a newer one.
+    // Ignore stale callbacks (e.g. a late onend from an utterance we cancelled
+    // when muting) that no longer match the note currently in flight.
+    if (!this.#current || this.#current.id !== id) return;
     if (this.speakingId === id) this.speakingId = null;
+    this.#current = null;
     this.#ttsBusy = false;
     this.#drainTts();
   }
@@ -708,6 +724,7 @@ export class TimelineStore {
     cancelSpeech();
     this.#ttsQueue = [];
     this.#ttsBusy = false;
+    this.#current = null;
     this.speakingId = null;
     // Forget the playhead marker so a subsequent past-playback reads the head at
     // the new position fresh, rather than skipping it as "already spoken".
@@ -825,6 +842,19 @@ export class TimelineStore {
     const next = new Set(this.mutedPubkeys);
     next.add(pubkey);
     this.mutedPubkeys = next;
+    // Take effect immediately, not just for future arrivals: drop this author's
+    // already-queued utterances...
+    this.#ttsQueue = this.#ttsQueue.filter((q) => q.pubkey !== pubkey);
+    // ...and cut off their note if it is the one being spoken right now, then
+    // move on to the next queued note. (A late onend from the cancelled
+    // utterance is ignored by #finishTts via the #current guard.)
+    if (this.#current?.pubkey === pubkey) {
+      cancelSpeech();
+      this.speakingId = null;
+      this.#current = null;
+      this.#ttsBusy = false;
+      this.#drainTts();
+    }
     this.#scheduleSave();
   }
 

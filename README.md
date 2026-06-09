@@ -22,6 +22,8 @@ This project was built to fulfill the [requirements document (要件書)](https:
 - **Note menu** — tap (or click) any note to open its options: **Show full
   post text** opens the untruncated content in a modal, and **Mute TTS for this
   author** permanently silences read-aloud for that note's author (pubkey).
+  Muting takes effect immediately: it drops any of that author's notes already
+  queued for speech and cuts off their note if it is being read at that moment.
   Muted authors are dimmed with a 🔇 badge and still appear in the timeline;
   the mute list persists across reloads (see *Persistence*) and can be undone
   from the same menu.
