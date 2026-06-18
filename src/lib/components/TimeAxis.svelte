@@ -87,4 +87,11 @@
     color: var(--live);
     font-weight: 700;
   }
+
+  /* On phones, give the timeline a touch more height by trimming the axis. */
+  @media (max-width: 640px) {
+    .axis {
+      height: 28px;
+    }
+  }
 </style>

@@ -1382,5 +1382,63 @@
     .composer {
       flex: 1 1 100%;
     }
+
+    /* ---- reclaim vertical space for the timeline ----
+       Shrink the chrome around the (flex:1) timeline: tighten padding/gap on
+       the fixed top/bottom regions and cap or hide non-essential explanatory
+       copy. All interactive controls and error messages remain visible. */
+    .topbar {
+      padding: 5px 12px;
+    }
+    .account-bar {
+      padding: 5px 12px;
+      gap: 4px;
+    }
+    /* Verbose follow/explain blurb is help text, not a control — hide it on
+       mobile. Error messages (.acct-error / .banner) stay visible. */
+    .acct-explain {
+      display: none;
+    }
+    .controls {
+      gap: 6px;
+      padding: 6px 10px 8px;
+    }
+    /* Composer is a bit shorter on mobile but still comfortably tappable. */
+    .composer {
+      min-height: 32px;
+    }
+    /* The post-time disclaimer is explanatory; hide on mobile to save space. */
+    .hint {
+      display: none;
+    }
+    /* Keep the always-visible AI summary, but cap it so it can't dominate. */
+    .ai-summary-card {
+      padding: 6px 8px;
+      gap: 4px;
+    }
+    .ai-summary-text {
+      max-height: 3em;
+      font-size: 12px;
+    }
+  }
+
+  /* ---- very narrow phones --------------------------------------------- */
+  @media (max-width: 430px) {
+    .topbar {
+      padding: 4px 10px;
+    }
+    .account-bar {
+      padding: 4px 10px;
+    }
+    .controls {
+      gap: 5px;
+      padding: 5px 8px 7px;
+    }
+    .ai-summary-text {
+      max-height: 2.5em;
+    }
+    .composer {
+      min-height: 30px;
+    }
   }
 </style>
