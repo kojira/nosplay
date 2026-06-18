@@ -903,6 +903,10 @@ export class TimelineStore {
     if (this.playheadMs >= now) {
       this.isLive = true;
       this.isPlaying = true;
+    } else {
+      // A shared/restored window can be sparse or empty; settle on the nearest
+      // real notes instead of freezing on a blank span.
+      this.#anchorPlayheadToVisibleNote();
     }
   }
 
@@ -1401,6 +1405,41 @@ export class TimelineStore {
   }
 
   /**
+   * After a deep jump / shared-range restore settles the playhead, the loaded
+   * notes nearest the target can all fall *before* the visible window's left
+   * edge, leaving `[playhead - windowMs, playhead]` empty. This happens when the
+   * requested span is sparse: either #fetchTargetRange came back empty and the
+   * fallback paged to much-older notes, or the slice only yielded notes in the
+   * TARGET_RANGE_ANCHOR_MS backfill margin below the visible window. Left as-is
+   * the timeline would freeze on a blank window. Pull the playhead back onto the
+   * most recent note at/behind it so that note sits at the window's right edge
+   * and any surrounding context fills in behind it.
+   *
+   * No-op when the current window already contains a note (preserves the exact
+   * landing for the common, non-sparse case) or when nothing is loaded.
+   */
+  #anchorPlayheadToVisibleNote(): void {
+    const arr = this.notes;
+    if (arr.length === 0) return;
+    const head = this.playheadMs;
+    // Binary search for the latest note at/behind the playhead. notes is sorted
+    // ascending by created_at, so this is the upper-bound index minus one.
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid].created_at * 1000 <= head) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === 0) return; // nothing at/behind the playhead (can't happen post-clamp)
+    const nearestMs = arr[lo - 1].created_at * 1000;
+    // Already visible (within [head - windowMs, head])? leave the landing alone.
+    if (nearestMs >= head - this.windowMs) return;
+    // Sparse window: settle on the nearest prior note so it's actually shown.
+    this.playheadMs = nearestMs;
+  }
+
+  /**
    * Seek to an absolute epoch-ms, fetching deeper history first when the target
    * predates the loaded range. Unlike seekTo (which clamps into the currently
    * loaded range), this is the path for an explicit Jump to an arbitrary past
@@ -1428,6 +1467,10 @@ export class TimelineStore {
     if (this.playheadMs >= now) {
       this.isLive = true;
       this.isPlaying = true;
+    } else {
+      // The requested window may be sparse/empty; settle on real notes so the
+      // jump lands on something visible rather than a frozen blank window.
+      this.#anchorPlayheadToVisibleNote();
     }
     this.#scheduleSave();
   }
