@@ -50,7 +50,10 @@ This project was built to fulfill the [requirements document (要件書)](https:
   LIVE. (At very high speeds notes stream past quickly and read-aloud can't keep
   up with every note; TTS keeps only the most recent backlog so it never jams.)
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
-  `datetime-local` jump to seek to any past moment within the loaded history.
+  `datetime-local` **Jump to** field: pick a moment, then press **Jump** to seek
+  to it within the loaded history. Editing the field never moves the playhead on
+  its own — the seek happens only on confirm — and jumping to a past moment
+  pauses playback there rather than auto-playing on.
 - **Shareable range links** — a **🔗 Share** button copies a link to the view
   you are looking at. Opening that link reproduces the same time range (see
   [Share links](#share-links)).

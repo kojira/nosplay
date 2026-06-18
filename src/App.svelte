@@ -217,21 +217,21 @@
   }
 
   // ---- "Jump to" datetime-local control --------------------------------
-  // The displayed value tracks the live playhead, but the rAF playback loop
-  // rewrites playheadMs ~60×/s (every frame in LIVE mode, and per frame while
-  // playing through the past). If that stream flows into the input while the
-  // user has the native picker open, every tick clobbers their in-progress
-  // selection and the chosen time can never be confirmed. So we freeze the
-  // input's value while it is focused (picker open) and only resync it from the
-  // playhead once focus leaves. The commit path stays onchange -> seekTo, which
-  // already clamps to [earliestMs, now] and re-enters LIVE at the right edge.
-  let jumpFocused = $state(false);
+  // jumpValue is a *draft*: editing it never moves the playhead. The seek only
+  // happens when the user presses the explicit "Jump" button (confirmJump).
+  //
+  // When the field is untouched we mirror the live playhead into it (the rAF
+  // loop rewrites playheadMs ~60×/s) so it always shows "where we are now". Once
+  // the user edits, jumpEdited latches true and that mirror stops — so neither
+  // Svelte nor the playback loop can clobber their in-progress selection, and
+  // the chosen time stays put until they confirm or cancel. Decoupling the draft
+  // from the apply timing this way means there is never a state where a time can
+  // be picked but not confirmed.
+  let jumpEdited = $state(false);
   let jumpValue = $state(toLocalInput(Date.now()));
   $effect(() => {
-    // Track + mirror the playhead only while the field is idle (not being
-    // edited). While focused, jumpValue is left untouched so neither Svelte nor
-    // the playback loop can overwrite the user's selection mid-pick.
-    if (!jumpFocused) jumpValue = toLocalInput(timeline.playheadMs);
+    // Mirror the playhead only while the draft is pristine (not being edited).
+    if (!jumpEdited) jumpValue = toLocalInput(timeline.playheadMs);
   });
 
   function onSpeedChange(e: Event): void {
@@ -257,11 +257,22 @@
     timeline.seekTo(Number((e.currentTarget as HTMLInputElement).value));
   }
 
-  function onJump(e: Event): void {
-    const raw = (e.currentTarget as HTMLInputElement).value;
-    if (!raw) return;
-    const ms = new Date(raw).getTime();
-    if (Number.isFinite(ms)) timeline.seekTo(ms);
+  /** Whether the current draft parses to a usable datetime. */
+  const jumpValid = $derived(Number.isFinite(new Date(jumpValue).getTime()));
+
+  /**
+   * Apply the drafted "Jump to" datetime. Only runs on an explicit confirm, so
+   * picking a time never moves the playhead on its own. seekTo clamps into
+   * [earliestMs, now] and re-enters LIVE if the target is at/after now; for a
+   * past target we stop playback at that moment rather than auto-playing on.
+   * Clearing jumpEdited lets the playhead mirror resume from the new position.
+   */
+  function confirmJump(): void {
+    const ms = new Date(jumpValue).getTime();
+    if (!Number.isFinite(ms)) return;
+    timeline.seekTo(ms);
+    if (!timeline.isLive) timeline.pause();
+    jumpEdited = false;
   }
 
   // ---- share link ------------------------------------------------------
@@ -526,17 +537,25 @@
           </select>
         </label>
 
-        <label class="field">
+        <label class="field jump">
           <span>Jump to</span>
-          <input
-            type="datetime-local"
-            value={jumpValue}
-            min={toLocalInput(timeline.earliestMs)}
-            max={toLocalInput(nowMs)}
-            onfocus={() => (jumpFocused = true)}
-            onblur={() => (jumpFocused = false)}
-            onchange={onJump}
-          />
+          <div class="jump-row">
+            <input
+              type="datetime-local"
+              bind:value={jumpValue}
+              min={toLocalInput(timeline.earliestMs)}
+              max={toLocalInput(nowMs)}
+              oninput={() => (jumpEdited = true)}
+            />
+            <button
+              type="button"
+              onclick={confirmJump}
+              disabled={!jumpValid}
+              title="Seek the playhead to the chosen time (stops playback)"
+            >
+              Jump
+            </button>
+          </div>
         </label>
       </div>
 
@@ -1051,6 +1070,11 @@
   }
   .field span {
     white-space: nowrap;
+  }
+  .jump-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 
   .primary {
