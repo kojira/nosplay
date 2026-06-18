@@ -41,18 +41,22 @@ This project was built to fulfill the [requirements document (要件書)](https:
   card, sourced (in priority order) from NIP-92 `imeta` tags, NIP-94-style `url`
   tags (accepted when a sibling `m`/`mime` tag declares `image/*`), and direct
   image links in the post text. Only `http(s)` URLs are ever used as an
-  `<img src>`. The card thumbnail shows the **whole** image (fit to a capped
-  height, letterboxed if needed) rather than a top-cropped slice, so you can
-  tell at a glance what the picture is; the height cap stays fixed so the lane
-  layout never shifts. When a note has **multiple** images the card shows the
-  first with a **+N** badge, and the full set is viewable in the **⋯ → Show full
-  post text** modal — a single image is shown **as large as practical (up to its
-  native size), downscaled only as much as needed to fit the modal width and the
-  viewport height**, and multiple images lay out in a grid, each whole and
-  uncropped (each links out to the original in a new tab). Broken or unreachable
-  images fail gracefully — the thumbnail (or gallery slot) is removed instead of
-  showing a broken-image glyph — and image cards reserve a little extra
-  horizontal room so they don't overlap their neighbours.
+  `<img src>`. The card thumbnail shows the **whole** image (letterboxed if
+  needed) rather than a top-cropped slice, so you can tell at a glance what the
+  picture is. The thumbnail box has a preferred height but **shrinks before the
+  card clips it**, so even on short lanes the bottom of the image is never cut
+  off; its rendered width still tracks the image so the lane layout (which
+  reserves a little extra horizontal room for image cards) is unchanged.
+  **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
+  that shows the image **at up to its native size, downscaled only as much as
+  needed to fit the viewport** — a much larger view without leaving the page.
+  Clicking the rest of the card still opens the note on njump.me. When a note
+  has **multiple** images the card shows the first with a **+N** badge; the
+  lightbox shows them all (stacked, each whole and uncropped), and the full set
+  is also viewable in the **⋯ → Show full post text** modal (each links out to
+  the original in a new tab). Broken or unreachable images fail gracefully — the
+  thumbnail (or gallery slot) is removed instead of showing a broken-image
+  glyph.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
   (1×–50×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
   Catching up to wall-clock now while fast-forwarding automatically snaps back to

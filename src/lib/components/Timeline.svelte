@@ -259,6 +259,8 @@
   let menuNote = $state<Note | null>(null);
   /** Note whose full text is shown in the modal, or null. */
   let fullTextNote = $state<Note | null>(null);
+  /** Note whose image(s) are shown enlarged in the lightbox, or null. */
+  let lightboxNote = $state<Note | null>(null);
 
   /**
    * Primary note action: open this specific event on njump.me in a new tab.
@@ -309,6 +311,16 @@
   function onMenuButton(e: MouseEvent, note: Note): void {
     e.stopPropagation();
     openMenu(note);
+  }
+
+  /**
+   * Enlarge a note's image(s) in an in-app lightbox. The card click opens
+   * njump.me, so tapping the thumbnail must stop the event from bubbling up to
+   * the card — otherwise both would fire (njump would win by opening a new tab).
+   */
+  function openLightbox(e: MouseEvent, note: Note): void {
+    e.stopPropagation();
+    lightboxNote = note;
   }
 
   function meta(n: Note): ProfileMeta | undefined {
@@ -422,7 +434,13 @@
       </div>
       <span class="content">{p.display}</span>
       {#if p.images.length > 0}
-        <span class="note-image">
+        <button
+          class="note-image"
+          type="button"
+          aria-label="Enlarge image"
+          title="Tap to enlarge"
+          onclick={(e) => openLightbox(e, p.note)}
+        >
           <img
             src={p.images[0]}
             alt="Note attachment"
@@ -431,10 +449,11 @@
             referrerpolicy="no-referrer"
             onerror={onNoteImageError}
           />
+          <span class="image-zoom-hint" aria-hidden="true">⤢</span>
           {#if p.images.length > 1}
             <span class="image-count" aria-label={`${p.images.length} images`}>+{p.images.length - 1}</span>
           {/if}
-        </span>
+        </button>
       {/if}
     </div>
   {/each}
@@ -498,6 +517,33 @@
         {/if}
         <button class="menu-item" type="button" onclick={() => (fullTextNote = null)}>Close</button>
       </div>
+    </div>
+  {/if}
+
+  <!-- image lightbox: enlarges a note's image(s) in-app, near native size but
+       always fitted to the viewport. Opened by tapping a card thumbnail. -->
+  {#if lightboxNote}
+    <div
+      class="overlay lightbox"
+      role="presentation"
+      onclick={() => (lightboxNote = null)}
+      onkeydown={(e) => onOverlayKey(e, () => (lightboxNote = null))}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="lightbox-inner" role="dialog" tabindex="-1" aria-modal="true" aria-label="Image viewer" onclick={(e) => e.stopPropagation()}>
+        {#each imageUrls(lightboxNote) as src (src)}
+          <img
+            class="lightbox-img"
+            {src}
+            alt="Note attachment"
+            decoding="async"
+            referrerpolicy="no-referrer"
+            onerror={onNoteImageError}
+          />
+        {/each}
+      </div>
+      <button class="lightbox-close" type="button" aria-label="Close image viewer" onclick={() => (lightboxNote = null)}>✕</button>
     </div>
   {/if}
 </div>
@@ -592,6 +638,9 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
+    /* Never give up vertical space when the card is squeezed to its lane cap —
+       only the image thumbnail shrinks (see .note-image). */
+    flex: 0 0 auto;
   }
 
   .avatar {
@@ -643,29 +692,62 @@
     -webkit-line-clamp: 3;
     line-clamp: 3;
     overflow: hidden;
+    /* Text keeps its (already clamped) height; the image gives up space first. */
+    flex: 0 0 auto;
   }
 
-  /* Inline image preview: a small thumbnail kept well within the card so the
-     lane layout stays stable. The capped height keeps the card height (and so
-     the lane layout) constant regardless of source image size, while
-     `object-fit: contain` shows the *whole* image (letterboxed) instead of
-     top-cropping it. The faint backdrop makes the letterbox margin read as
-     intentional. */
+  /* Inline image preview: a tap-to-enlarge thumbnail kept well within the card.
+     It is the ONE flex child allowed to shrink (head-row and content are
+     `flex: 0 0 auto`). The thumbnail box has a preferred `height` of 72px, but
+     `flex: 0 1 auto; min-height: 0` lets it give up height when head + content
+     + image would otherwise exceed the card's lane cap — so the thumbnail box
+     shrinks instead of the card clipping the image's bottom edge (which read as
+     a "top-crop"). The img fills the box (`height: 100%`) with
+     `object-fit: contain`, so the *whole* picture is always visible
+     (letterboxed) at whatever height the box ends up — never cropped. `width`
+     still tracks the image's intrinsic width (capped by the card's max-width),
+     so image cards keep the same rendered width the lane reservation assumes.
+     The faint backdrop makes the letterbox margin read as intentional. */
   .note-image {
     position: relative;
     display: block;
+    width: 100%;
+    height: 72px;
+    flex: 0 1 auto;
+    min-height: 0;
     margin-top: 2px;
+    padding: 0;
+    border: none;
     border-radius: 6px;
     overflow: hidden;
     background: rgba(255, 255, 255, 0.04);
+    cursor: zoom-in;
+  }
+  .note-image:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 1px;
   }
 
   .note-image img {
     display: block;
     width: 100%;
-    height: auto;
-    max-height: 72px;
+    height: 100%;
     object-fit: contain;
+  }
+
+  /* A small "expand" affordance so it's obvious the thumbnail enlarges on tap
+     (it's purely decorative — the whole thumbnail is the button). */
+  .image-zoom-hint {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 11px;
+    line-height: 1.5;
+    pointer-events: none;
   }
 
   /* "+N" badge when a note carries more images than the single thumbnail shown.
@@ -899,5 +981,61 @@
     width: 100%;
     max-height: 42vh;
     object-fit: contain;
+  }
+
+  /* ---- image lightbox ---- */
+  /* Sits above the menu/full-text overlays (z 20). Shows a note's image(s) at
+     (up to) native size, but always fitted to the viewport: `width/height: auto`
+     keeps small images from being blown up, while the `max-width`/`max-height`
+     caps force giant images to downscale so they never overflow the screen.
+     Multiple images stack and the inner box scrolls. */
+  .lightbox {
+    z-index: 30;
+    flex-direction: column;
+    background: rgba(0, 0, 0, 0.85);
+  }
+
+  .lightbox-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    max-width: 100%;
+    max-height: 100%;
+    overflow: auto;
+  }
+
+  .lightbox-img {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: min(96vw, 100%);
+    max-height: 86vh;
+    object-fit: contain;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .lightbox-close {
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    appearance: none;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .lightbox-close:hover,
+  .lightbox-close:focus-visible {
+    background: var(--accent-bg);
+    color: var(--accent);
+    outline: none;
   }
 </style>
