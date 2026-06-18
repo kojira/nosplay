@@ -646,20 +646,26 @@
   }
 
   /* Inline image preview: a small thumbnail kept well within the card so the
-     lane layout stays stable. Capped height avoids giant images. */
+     lane layout stays stable. The capped height keeps the card height (and so
+     the lane layout) constant regardless of source image size, while
+     `object-fit: contain` shows the *whole* image (letterboxed) instead of
+     top-cropping it. The faint backdrop makes the letterbox margin read as
+     intentional. */
   .note-image {
     position: relative;
     display: block;
     margin-top: 2px;
     border-radius: 6px;
     overflow: hidden;
+    background: rgba(255, 255, 255, 0.04);
   }
 
   .note-image img {
     display: block;
     width: 100%;
+    height: auto;
     max-height: 72px;
-    object-fit: cover;
+    object-fit: contain;
   }
 
   /* "+N" badge when a note carries more images than the single thumbnail shown.
@@ -840,8 +846,8 @@
   }
 
   .modal {
-    width: min(560px, 92%);
-    max-height: 80%;
+    width: min(820px, 94%);
+    max-height: 88%;
   }
 
   .modal-body {
@@ -854,9 +860,11 @@
     padding: 8px 4px;
   }
 
-  /* Full-text modal gallery: all of a note's images. A single image gets the
-     full width; multiple images lay out in a responsive grid. Each links out to
-     the original in a new tab. */
+  /* Full-text modal gallery: all of a note's images. A single image is shown as
+     large as practical — up to its native size — while still fitting inside the
+     modal width and the viewport height (giant images downscale, small ones are
+     not blown up). Multiple images lay out in a responsive grid, each whole and
+     uncropped. Each links out to the original in a new tab. */
   .modal-gallery {
     display: grid;
     grid-template-columns: 1fr;
@@ -871,16 +879,25 @@
     display: block;
     border-radius: 8px;
     overflow: hidden;
+    background: rgba(255, 255, 255, 0.04);
+    text-align: center;
   }
 
   .modal-image img {
     display: block;
-    width: 100%;
-    max-height: 320px;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: 78vh;
+    margin: 0 auto;
     object-fit: contain;
   }
+  /* In the grid, each cell takes its column width; the image fills that width
+     and stays whole (contain, not cover), capped to a slice of the viewport so
+     several images stay scannable without scrolling forever. */
   .modal-gallery.multi .modal-image img {
-    max-height: 200px;
-    object-fit: cover;
+    width: 100%;
+    max-height: 42vh;
+    object-fit: contain;
   }
 </style>
