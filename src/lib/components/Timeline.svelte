@@ -201,6 +201,12 @@
     stacked: Note[];
     /** Total cards represented by this footprint (behind count + 1). 1 = plain. */
     count: number;
+    /** Deterministic rotation order for an author stack: the footprint owner
+     *  followed by its stacked notes, in the same (created_at, id) order the
+     *  packer used. Length === count. The visible front cycles through this list
+     *  (see frontNote), so every folded note surfaces in turn; for a plain card
+     *  it is just [note]. */
+    order: Note[];
   }
 
   // --- Measurement cache (C7: estimate → measure → re-pack on y only) ---------
@@ -326,6 +332,7 @@
         display: nm?.display ?? '',
         stacked,
         count: item.count ?? 1,
+        order: [note, ...stacked],
       });
     }
     return out;
@@ -339,14 +346,50 @@
     return (1 - f) * 100;
   }
 
+  // ---- author-stack rotation ----
+  // How long (ms of playback time) each stacked note stays in front before the
+  // next one rotates up. "A few seconds" — noticeable but not frantic.
+  const ROTATE_MS = 4000;
+
+  /**
+   * The note currently shown in FRONT of an author stack. The index is derived
+   * purely from the playback clock (timeline.playheadMs / ROTATE_MS), so it is:
+   *  - deterministic — same playhead ⇒ same front, never Date.now()/random;
+   *  - self-advancing — playheadMs moves during playback and LIVE, so the front
+   *    rotates through every folded note in `order` on its own;
+   *  - auto-pausing — pausing stops the playhead (LIVE→pinned, or isPlaying off),
+   *    so the index freezes and rotation naturally stops while paused.
+   * A plain card (count === 1) always returns its sole note unchanged.
+   */
+  function frontNote(p: Placed): Note {
+    if (p.count <= 1) return p.note;
+    const idx = Math.floor(timeline.playheadMs / ROTATE_MS) % p.order.length;
+    return p.order[idx];
+  }
+
   // Register/unregister a card element for measurement. The action re-measures
   // after the node mounts; the $effect below re-measures the whole visible set
   // whenever it (or its content) changes.
-  function measure(el: HTMLElement, id: string): { destroy: () => void } {
-    cardEls.set(id, el);
+  // `on` is false for an author-stack FRONT: that card's box renders rotating
+  // stacked content, so we must NOT feed it back into the owner's measurement —
+  // doing so would churn the footprint every rotation and could reflow (and thus
+  // overlap) neighbours. With on:false the owner's last measured/estimated size
+  // stays frozen, keeping the reserved footprint stable (C4). A note flipping
+  // between plain and stacked toggles `on` via update(), re-/de-registering it.
+  function measure(
+    el: HTMLElement,
+    param: { id: string; on: boolean },
+  ): { update: (p: { id: string; on: boolean }) => void; destroy: () => void } {
+    let cur = param;
+    if (cur.on) cardEls.set(cur.id, el);
     return {
+      update(next) {
+        if (cur.on) cardEls.delete(cur.id);
+        cur = next;
+        if (cur.on) cardEls.set(cur.id, el);
+      },
       destroy() {
-        cardEls.delete(id);
+        if (cur.on) cardEls.delete(cur.id);
       },
     };
   }
@@ -522,14 +565,23 @@
   {/if}
 
   {#each placed as p (p.note.id)}
-    <!-- A card's LEFT edge is its time anchor (left = (1 - f), C5); its TOP comes
-         from the pure 2D packer (stable for the note's lifetime, C4). Vertical
-         size is JS/content-driven now (no fixed-lane CSS height), so the packer's
-         reserved footprint matches the rendered box and cards never overlap or
-         overflow the bottom edge (C1/C2). When a note is an author-stack front
-         it carries `stacked` notes shown as thin offset cards behind it + a count
-         badge; the front keeps the full interactive card (njump, ⋯, TTS,
-         lightbox, full-text). The behind cards never grow the footprint. -->
+    <!-- The slot's LEFT edge is the FOOTPRINT OWNER's time anchor (left = (1 - f),
+         C5) and its TOP comes from the pure 2D packer (stable for the note's
+         lifetime, C4) — both stay pinned to p.note so the layout never shifts.
+         For an author stack the card CONTENT rotates: `front` is whichever folded
+         note is currently up (deterministic, playhead-driven; see frontNote), and
+         every badge/avatar/content/image/interaction below is read off `front`,
+         not the owner. The owner's frozen footprint is reused regardless of which
+         note is shown, and the card is capped to it (CSS .is-stack .note +
+         max-height) so a taller stacked note can never grow the box and overlap a
+         neighbour (C1/C2). The behind decorative cards never grow the footprint. -->
+    {@const front = frontNote(p)}
+    {@const fm = noteMeta.get(front.id)}
+    {@const fImages = fm?.images ?? p.images}
+    {@const fDisplay = fm?.display ?? p.display}
+    {@const isHead = front.id === (timeline.headNote?.id ?? null)}
+    {@const isSpeaking = front.id === timeline.speakingId}
+    {@const isMuted = timeline.mutedPubkeys.has(front.pubkey)}
     <div
       class="note-slot"
       class:is-stack={p.count > 1}
@@ -542,76 +594,83 @@
         <span class="stack-card stack-1" aria-hidden="true"></span>
         <span class="stack-count" aria-label={`${p.count} notes from this author`}>×{p.count}</span>
       {/if}
-      <div
-        class="note"
-        class:head={p.isHead}
-        class:speaking={p.isSpeaking}
-        class:muted={p.isMuted}
-        class:has-image={p.images.length > 0}
-        use:measure={p.note.id}
-        role="button"
-        tabindex="0"
-        title="Open this note on njump.me (new tab) — use ⋯ for options"
-        onclick={() => openNote(p.note)}
-        onkeydown={(e) => onNoteKey(e, p.note)}
-      >
-        <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
-             that left edge so variable-width cards still read right→newer. -->
-        <span class="time-anchor" aria-hidden="true"></span>
-        <button
-          class="note-menu-btn"
-          type="button"
-          aria-label="Note options"
-          title="Options (full text, mute TTS)"
-          onclick={(e) => onMenuButton(e, p.note)}
-        >⋯</button>
-        <div class="head-row">
-          {#if p.isSpeaking}
-            <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
-          {/if}
-          {#if p.isMuted}
-            <span class="muted-badge" title="TTS muted for this author" aria-label="TTS muted">🔇</span>
-          {/if}
-          <span class="avatar" aria-hidden="true">
-            <span class="avatar-fallback">{initial(p.note)}</span>
-            {#if meta(p.note)?.picture}
-              <img
-                class="avatar-img"
-                src={meta(p.note)?.picture}
-                alt=""
-                loading="lazy"
-                referrerpolicy="no-referrer"
-                onerror={onAvatarError}
-              />
-            {/if}
-          </span>
-          <span class="author">{name(p.note)}</span>
-        </div>
-        <span class="content">{p.display}</span>
-        {#if p.images.length > 0}
+      <!-- Keyed on the front note's id: for a plain card the key is constant so
+           the element never remounts; for a stack the key changes on each
+           rotation, replaying the subtle entry animation as the next note rises. -->
+      {#key front.id}
+        <div
+          class="note"
+          class:head={isHead}
+          class:speaking={isSpeaking}
+          class:muted={isMuted}
+          class:has-image={fImages.length > 0}
+          class:rotate-in={p.count > 1}
+          style={p.count > 1 ? `max-height: ${p.height}px;` : ''}
+          use:measure={{ id: p.note.id, on: p.count === 1 }}
+          role="button"
+          tabindex="0"
+          title="Open this note on njump.me (new tab) — use ⋯ for options"
+          onclick={() => openNote(front)}
+          onkeydown={(e) => onNoteKey(e, front)}
+        >
+          <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
+               that left edge so variable-width cards still read right→newer. -->
+          <span class="time-anchor" aria-hidden="true"></span>
           <button
-            class="note-image"
+            class="note-menu-btn"
             type="button"
-            aria-label="Enlarge image"
-            title="Tap to enlarge"
-            onclick={(e) => openLightbox(e, p.note)}
-          >
-            <img
-              src={p.images[0]}
-              alt="Note attachment"
-              loading="lazy"
-              decoding="async"
-              referrerpolicy="no-referrer"
-              onload={() => onImageLoad(p.note.id)}
-              onerror={onNoteImageError}
-            />
-            <span class="image-zoom-hint" aria-hidden="true">⤢</span>
-            {#if p.images.length > 1}
-              <span class="image-count" aria-label={`${p.images.length} images`}>+{p.images.length - 1}</span>
+            aria-label="Note options"
+            title="Options (full text, mute TTS)"
+            onclick={(e) => onMenuButton(e, front)}
+          >⋯</button>
+          <div class="head-row">
+            {#if isSpeaking}
+              <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
             {/if}
-          </button>
-        {/if}
-      </div>
+            {#if isMuted}
+              <span class="muted-badge" title="TTS muted for this author" aria-label="TTS muted">🔇</span>
+            {/if}
+            <span class="avatar" aria-hidden="true">
+              <span class="avatar-fallback">{initial(front)}</span>
+              {#if meta(front)?.picture}
+                <img
+                  class="avatar-img"
+                  src={meta(front)?.picture}
+                  alt=""
+                  loading="lazy"
+                  referrerpolicy="no-referrer"
+                  onerror={onAvatarError}
+                />
+              {/if}
+            </span>
+            <span class="author">{name(front)}</span>
+          </div>
+          <span class="content">{fDisplay}</span>
+          {#if fImages.length > 0}
+            <button
+              class="note-image"
+              type="button"
+              aria-label="Enlarge image"
+              title="Tap to enlarge"
+              onclick={(e) => openLightbox(e, front)}
+            >
+              <img
+                src={fImages[0]}
+                alt="Note attachment"
+                loading="lazy"
+                decoding="async"
+                referrerpolicy="no-referrer"
+                onload={() => p.count === 1 && onImageLoad(front.id)}
+                onerror={onNoteImageError}
+              />
+              <span class="image-zoom-hint" aria-hidden="true">⤢</span>
+              {#if fImages.length > 1}
+                <span class="image-count" aria-label={`${fImages.length} images`}>+{fImages.length - 1}</span>
+              {/if}
+            </button>
+          {/if}
+        </div>
+      {/key}
     </div>
   {/each}
 
@@ -955,6 +1014,37 @@
     font-weight: 700;
     line-height: 1.5;
     pointer-events: none;
+  }
+
+  /* A stack front is capped to the packer's reserved footprint (inline
+     max-height = p.height) with border-box sizing, and clipped (.note already
+     sets overflow:hidden). Rotating a taller-or-shorter stacked note through the
+     front therefore can never grow the box past what the packer reserved, so the
+     no-overlap / no-overflow invariants (C1/C2) hold for whichever note is up. */
+  .note-slot.is-stack .note {
+    box-sizing: border-box;
+  }
+
+  /* Subtle entry as the front swaps to the next stacked note: a brief fade plus a
+     slight rise/settle — noticeable but quiet. The keyed remount (per front id)
+     replays it on each rotation. Disabled under reduced-motion. */
+  @keyframes stackRotateIn {
+    from {
+      opacity: 0.4;
+      transform: translateY(4px) scale(0.985);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+  .note-slot.is-stack .note.rotate-in {
+    animation: stackRotateIn 0.32s ease-out;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .note-slot.is-stack .note.rotate-in {
+      animation: none;
+    }
   }
 
   /* A small "expand" affordance so it's obvious the thumbnail enlarges on tap

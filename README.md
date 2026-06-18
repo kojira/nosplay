@@ -33,7 +33,16 @@ This project was built to fulfill the [requirements document (要件書)](https:
   card without overlapping, **nearby notes from the same author are folded into a
   single "author stack"** — the front note renders as a normal, fully interactive
   card (offset cards peek out behind it with a **×N** count badge) so the timeline
-  stays non-overlapping while **never dropping a note**.
+  stays non-overlapping while **never dropping a note**. A stack's front
+  **rotates every few seconds** so each folded note cycles up to the front in
+  turn (with a subtle fade-in), and whichever note is currently up is the one all
+  interactions act on — clicking opens *that* note on njump, and its
+  badges/avatar/content/image/⋯-menu/lightbox/full-text all follow it. The
+  rotation order is **deterministic** (derived from the playback clock, not
+  `Date.now()`/random) and it advances with playback and LIVE but **stops while
+  paused** — pausing freezes the playhead, so the front holds on the note you
+  paused on. The card stays clipped to the footprint the packer reserved, so
+  rotating never reintroduces overlap.
 - **Open on njump** — **clicking (or pressing Enter/Space on) a note opens that
   specific event on [njump.me](https://njump.me) in a new tab** (`https://njump.me/<note1…>`,
   with the `note1` id encoded via NIP-19). The per-note options that the click
