@@ -51,21 +51,36 @@ function parseImeta(tag: string[]): { url?: string; mime?: string } {
   return out;
 }
 
+/** Upper bound on previewable images per note, so a gallery post can't explode. */
+const MAX_IMAGES = 4;
+
 /**
- * Best single image URL to preview for a note, or null when none is found.
- * Tags win over content; an image/* mime hint accepts a URL even without a
- * recognised image extension.
+ * All previewable image URLs for a note, in priority order and de-duplicated,
+ * capped at MAX_IMAGES. Tags win over content; an image/* mime hint accepts a
+ * URL even without a recognised image extension. The same three routes as
+ * before, but now collecting *every* match instead of stopping at the first —
+ * so multi-image (NIP-92 gallery, several content links) notes show more than
+ * one thumbnail. Only http/https URLs are ever returned.
  */
-export function getNoteImageUrl(note: Pick<Note, 'content' | 'tags'>): string | null {
+export function getNoteImageUrls(note: Pick<Note, 'content' | 'tags'>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (url: string | null): void => {
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      out.push(url);
+    }
+  };
+
   const tags = note.tags;
   if (tags) {
-    // 1. NIP-92 imeta tags.
+    // 1. NIP-92 imeta tags (one image per tag; a note may carry several).
     for (const tag of tags) {
       if (tag[0] !== 'imeta') continue;
       const { url, mime } = parseImeta(tag);
       if (!url) continue;
       const http = asHttpUrl(url);
-      if (http && (hasImageExt(http) || mime?.startsWith('image/'))) return http;
+      if (http && (hasImageExt(http) || mime?.startsWith('image/'))) push(http);
     }
 
     // 2. NIP-94-style url tags, biased by a sibling image/* mime tag.
@@ -75,18 +90,26 @@ export function getNoteImageUrl(note: Pick<Note, 'content' | 'tags'>): string | 
     for (const tag of tags) {
       if (tag[0] !== 'url' || !tag[1]) continue;
       const http = asHttpUrl(tag[1]);
-      if (http && (hasImageExt(http) || mimeIsImage)) return http;
+      if (http && (hasImageExt(http) || mimeIsImage)) push(http);
     }
   }
 
-  // 3. Direct image URLs inside the content text.
+  // 3. Direct image URLs inside the content text (every occurrence).
   const matches = note.content.match(URL_RE);
   if (matches) {
     for (const m of matches) {
       const http = asHttpUrl(m);
-      if (http && hasImageExt(http)) return http;
+      if (http && hasImageExt(http)) push(http);
     }
   }
 
-  return null;
+  return out.slice(0, MAX_IMAGES);
+}
+
+/**
+ * Best single image URL to preview for a note, or null when none is found.
+ * Thin wrapper over getNoteImageUrls() preserved for existing callers.
+ */
+export function getNoteImageUrl(note: Pick<Note, 'content' | 'tags'>): string | null {
+  return getNoteImageUrls(note)[0] ?? null;
 }

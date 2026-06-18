@@ -18,7 +18,7 @@
   let postMode = $state<'current' | 'playback'>('current');
   let posting = $state(false);
 
-  const SPEED_OPTIONS = [1, 1.5, 2, 3, 5, 8, 10, 15, 20];
+  const SPEED_OPTIONS = [1, 1.5, 2, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50];
   /** Drop trailing ".0" so 1× / 1.5× / 20× all read cleanly. */
   function speedLabel(s: number): string {
     return `${Number.isInteger(s) ? s : s.toFixed(1)}×`;

@@ -18,17 +18,37 @@ This project was built to fulfill the [requirements document (要件書)](https:
   npub fallback), and long posts wrap and clamp instead of being truncated.
   Each note keeps a stable vertical lane for its lifetime (assigned once, keyed
   to its identity/author), so notes scroll horizontally without bouncing up and
-  down as the visible window slides.
-- **Note menu** — tap (or click) any note to open its options: **Show full
-  post text** opens the untruncated content in a modal, and **Mute TTS for this
-  author** permanently silences read-aloud for that note's author (pubkey).
-  Muting takes effect immediately: it drops any of that author's notes already
-  queued for speech and cuts off their note if it is being read at that moment.
-  Muted authors are dimmed with a 🔇 badge and still appear in the timeline;
-  the mute list persists across reloads (see *Persistence*) and can be undone
-  from the same menu.
+  down as the visible window slides. A card's **right edge is its exact time
+  anchor**, marked with a thin accent rail, so even though cards have different
+  widths (short vs. long text, with/without an image) the timeline always reads
+  right → newest, left → older. Notes posted in the same second are ordered
+  deterministically by event id, so the horizontal layout is stable run-to-run.
+- **Open on njump** — **clicking (or pressing Enter/Space on) a note opens that
+  specific event on [njump.me](https://njump.me) in a new tab** (`https://njump.me/<note1…>`,
+  with the `note1` id encoded via NIP-19). The per-note options that the click
+  used to open now live behind a small **⋯** button on each card: **Show full
+  post text** opens the untruncated content (and any images) in a modal, and
+  **Mute / Unmute TTS for this author** permanently silences (or restores)
+  read-aloud for that note's author (pubkey). Muting takes effect immediately:
+  it drops any of that author's notes already queued for speech and cuts off
+  their note if it is being read at that moment. Muted authors are dimmed with a
+  🔇 badge and still appear in the timeline; the mute list persists across
+  reloads (see *Persistence*) and can be undone from the same menu.
+- **Image previews** — notes that carry images show an inline thumbnail on the
+  card, sourced (in priority order) from NIP-92 `imeta` tags, NIP-94-style `url`
+  tags (accepted when a sibling `m`/`mime` tag declares `image/*`), and direct
+  image links in the post text. Only `http(s)` URLs are ever used as an
+  `<img src>`. When a note has **multiple** images the card shows the first with
+  a **+N** badge, and the full set is viewable as a grid in the **⋯ → Show full
+  post text** modal (each image links out to the original in a new tab). Broken
+  or unreachable images fail gracefully — the thumbnail (or gallery slot) is
+  removed instead of showing a broken-image glyph — and image cards reserve a
+  little extra horizontal room so they don't overlap their neighbours.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
-  (1×–20×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
+  (1×–50×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
+  Catching up to wall-clock now while fast-forwarding automatically snaps back to
+  LIVE. (At very high speeds notes stream past quickly and read-aloud can't keep
+  up with every note; TTS keeps only the most recent backlog so it never jams.)
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
   `datetime-local` jump to seek to any past moment within the loaded history.
 - **Shareable range links** — a **🔗 Share** button copies a link to the view

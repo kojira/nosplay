@@ -942,13 +942,21 @@ export class TimelineStore {
     };
     this.#ids.add(note.id);
 
-    // Insert keeping ascending order by created_at.
+    // Insert keeping ascending order by (created_at, id). created_at is only
+    // second-precise, so same-second notes would otherwise land in arrival
+    // order, which differs run-to-run; breaking ties by the (stable, unique)
+    // event id gives a deterministic left-to-right and lane assignment order so
+    // the horizontal layout reads the same every time.
     const arr = this.notes;
     let lo = 0;
     let hi = arr.length;
     while (lo < hi) {
       const mid = (lo + hi) >> 1;
-      if (arr[mid].created_at < note.created_at) lo = mid + 1;
+      const m = arr[mid];
+      const before =
+        m.created_at < note.created_at ||
+        (m.created_at === note.created_at && m.id < note.id);
+      if (before) lo = mid + 1;
       else hi = mid;
     }
     arr.splice(lo, 0, note);

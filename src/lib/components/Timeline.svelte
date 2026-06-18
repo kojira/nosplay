@@ -1,7 +1,8 @@
 <script lang="ts">
   import { timeline } from '../timeline/store.svelte';
   import { shortNpub } from '../timeline/format';
-  import { getNoteImageUrl } from '../nostr/images';
+  import { getNoteImageUrls } from '../nostr/images';
+  import { njumpUrl } from '../nostr/njump';
   import type { ProfileMeta } from '../nostr/profiles';
   import type { Note } from '../nostr/types';
 
@@ -17,6 +18,7 @@
   // collide; the per-note, content-aware estimate below replaces that.
   const MAX_NOTE_PX = 340; // .note max-width cap (px)
   const MIN_NOTE_PX = 120; // floor so tiny notes still reserve breathing room
+  const IMG_NOTE_PX = 220; // floor for image-bearing notes (thumbnail is wider)
   const NOTE_VW_FRACTION = 0.6; // .note max-width: ...60vw
   const PAD_X = 10; // .note horizontal padding (px), both sides
   const AVATAR_PX = 18; // .avatar width
@@ -69,13 +71,22 @@
    * Result is clamped into [MIN_NOTE_PX, maxNotePx]. `maxNotePx` is the effective
    * CSS max for the current container; pass MAX_NOTE_PX before it is measured.
    */
-  function estNotePx(authorText: string, content: string, maxNotePx: number): number {
+  function estNotePx(
+    authorText: string,
+    content: string,
+    maxNotePx: number,
+    hasImage: boolean,
+  ): number {
     const innerMax = Math.max(MIN_NOTE_PX - PAD_X * 2, maxNotePx - PAD_X * 2);
     const headRow = AVATAR_PX + HEAD_GAP_PX + estTextPx(authorText, AUTHOR_FONT);
     const contentLine = Math.min(estTextPx(content, CONTENT_FONT), innerMax);
     const inner = Math.max(headRow, contentLine);
     const total = inner + PAD_X * 2;
-    return Math.min(maxNotePx, Math.max(MIN_NOTE_PX, total));
+    // Image-bearing notes render a thumbnail that is visually wider than short
+    // text, so reserve a wider lane span for them (clamped to the CSS max) — this
+    // keeps an image card from being under-reserved and overlapping its neighbour.
+    const floor = hasImage ? Math.min(maxNotePx, IMG_NOTE_PX) : MIN_NOTE_PX;
+    return Math.min(maxNotePx, Math.max(floor, total));
   }
 
   /** Measured timeline width (px); drives the busy-interval calculation. */
@@ -136,6 +147,8 @@
     isHead: boolean;
     isSpeaking: boolean;
     isMuted: boolean;
+    /** Previewable image URLs for this note (computed once per placement pass). */
+    images: string[];
   }
 
   // Identity-keyed lane cache. A note keeps the lane it was first assigned for
@@ -197,6 +210,9 @@
     for (const note of notes) {
       const ms = note.created_at * 1000;
       const f = (playhead - ms) / win; // 0..1 from right edge
+      // Resolve image URLs once here, then reuse for both the lane-width
+      // estimate and rendering (the template never re-scans the note).
+      const images = getNoteImageUrls(note);
       // Reuse the note's existing lane when known; only assign one the first
       // time we see it. New notes fit around the lanes already occupied this
       // pass, so overlaps stay reasonable while existing rows stay put.
@@ -210,7 +226,7 @@
       // Content-aware (vs. the old single MAX width for every note): short notes
       // free their lane sooner, wide notes hold it longer so they can't collide.
       const busyMs = measured
-        ? win * Math.min((estNotePx(name(note), note.content, maxNotePx) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
+        ? win * Math.min((estNotePx(name(note), note.content, maxNotePx, images.length > 0) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
         : win * FALLBACK_BUSY_FRACTION;
       laneFreeAt[lane] = ms + busyMs;
       out.push({
@@ -220,6 +236,7 @@
         isHead: note.id === headId,
         isSpeaking: note.id === speakingId,
         isMuted: muted.has(note.pubkey),
+        images,
       });
     }
     return out;
@@ -230,6 +247,18 @@
   let menuNote = $state<Note | null>(null);
   /** Note whose full text is shown in the modal, or null. */
   let fullTextNote = $state<Note | null>(null);
+
+  /**
+   * Primary note action: open this specific event on njump.me in a new tab.
+   * `noopener,noreferrer` keeps the opened page from reaching back into this
+   * one. A note whose id can't be encoded (shouldn't happen for real events)
+   * falls back to opening its options menu so the click is never dead.
+   */
+  function openNote(note: Note): void {
+    const url = njumpUrl(note.id);
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+    else openMenu(note);
+  }
 
   function openMenu(note: Note): void {
     menuNote = note;
@@ -254,10 +283,20 @@
   }
 
   function onNoteKey(e: KeyboardEvent, note: Note): void {
+    // Ignore keys that bubbled up from the inner ⋯ button (which has its own
+    // activation), so pressing Enter there opens the menu without also opening
+    // njump.
+    if (e.currentTarget !== e.target) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      openMenu(note);
+      openNote(note);
     }
+  }
+
+  /** Open the options menu from the card's ⋯ button without triggering njump. */
+  function onMenuButton(e: MouseEvent, note: Note): void {
+    e.stopPropagation();
+    openMenu(note);
   }
 
   function meta(n: Note): ProfileMeta | undefined {
@@ -273,16 +312,20 @@
     return (nm ?? n.pubkey).slice(0, 1).toUpperCase();
   }
 
-  // The single image URL (if any) to preview for a note, used both inline in
-  // the card and in the full-text modal. See src/lib/nostr/images.ts.
-  function imageUrl(n: Note): string | null {
-    return getNoteImageUrl(n);
+  // All previewable image URLs for a note (capped), used by the full-text
+  // modal's gallery. The timeline cards reuse the per-placement `images` list.
+  // See src/lib/nostr/images.ts.
+  function imageUrls(n: Note): string[] {
+    return getNoteImageUrls(n);
   }
 
-  // Hide a broken note image so the card collapses back to text-only.
+  // Hide a broken note image so the card (or modal gallery slot) collapses
+  // gracefully instead of showing a broken-image glyph.
   function onNoteImageError(e: Event): void {
     const img = e.currentTarget as HTMLImageElement;
-    img.closest('.note-image')?.remove();
+    const wrap = img.closest('.note-image, .modal-image');
+    if (wrap) wrap.remove();
+    else img.remove();
   }
 
   // Hide a broken avatar image so the letter fallback (behind it) shows through.
@@ -319,7 +362,6 @@
   {/if}
 
   {#each placed as p (p.note.id)}
-    {@const noteImg = imageUrl(p.note)}
     <div
       class="note"
       class:head={p.isHead}
@@ -328,10 +370,20 @@
       style="right: {p.f * 100}%; top: {(p.lane / LANES) * 100}%;"
       role="button"
       tabindex="0"
-      title="Tap for options"
-      onclick={() => openMenu(p.note)}
+      title="Open this note on njump.me (new tab) — use ⋯ for options"
+      onclick={() => openNote(p.note)}
       onkeydown={(e) => onNoteKey(e, p.note)}
     >
+      <!-- The card's right edge is its exact time anchor; this rail makes that
+           obvious so variable-width cards still read right→newest. -->
+      <span class="time-anchor" aria-hidden="true"></span>
+      <button
+        class="note-menu-btn"
+        type="button"
+        aria-label="Note options"
+        title="Options (full text, mute TTS)"
+        onclick={(e) => onMenuButton(e, p.note)}
+      >⋯</button>
       <div class="head-row">
         {#if p.isSpeaking}
           <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
@@ -355,16 +407,19 @@
         <span class="author">{name(p.note)}</span>
       </div>
       <span class="content">{p.note.content}</span>
-      {#if noteImg}
+      {#if p.images.length > 0}
         <span class="note-image">
           <img
-            src={noteImg}
+            src={p.images[0]}
             alt="Note attachment"
             loading="lazy"
             decoding="async"
             referrerpolicy="no-referrer"
             onerror={onNoteImageError}
           />
+          {#if p.images.length > 1}
+            <span class="image-count" aria-label={`${p.images.length} images`}>+{p.images.length - 1}</span>
+          {/if}
         </span>
       {/if}
     </div>
@@ -411,16 +466,21 @@
       <div class="modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Full post text" onclick={(e) => e.stopPropagation()}>
         <div class="modal-head">{name(fullTextNote)}</div>
         <div class="modal-body">{fullTextNote.content}</div>
-        {#if imageUrl(fullTextNote)}
-          <a class="modal-image" href={imageUrl(fullTextNote)} target="_blank" rel="noreferrer noopener">
-            <img
-              src={imageUrl(fullTextNote)}
-              alt="Note attachment"
-              loading="lazy"
-              decoding="async"
-              referrerpolicy="no-referrer"
-            />
-          </a>
+        {#if imageUrls(fullTextNote).length > 0}
+          <div class="modal-gallery" class:multi={imageUrls(fullTextNote).length > 1}>
+            {#each imageUrls(fullTextNote) as src (src)}
+              <a class="modal-image" href={src} target="_blank" rel="noreferrer noopener">
+                <img
+                  {src}
+                  alt="Note attachment"
+                  loading="lazy"
+                  decoding="async"
+                  referrerpolicy="no-referrer"
+                  onerror={onNoteImageError}
+                />
+              </a>
+            {/each}
+          </div>
         {/if}
         <button class="menu-item" type="button" onclick={() => (fullTextNote = null)}>Close</button>
       </div>
@@ -574,6 +634,7 @@
   /* Inline image preview: a small thumbnail kept well within the card so the
      lane layout stays stable. Capped height avoids giant images. */
   .note-image {
+    position: relative;
     display: block;
     margin-top: 2px;
     border-radius: 6px;
@@ -585,6 +646,69 @@
     width: 100%;
     max-height: 72px;
     object-fit: cover;
+  }
+
+  /* "+N" badge when a note carries more images than the single thumbnail shown.
+     The full set is viewable in the options → full-text modal gallery. */
+  .image-count {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.4;
+    pointer-events: none;
+  }
+
+  /* The card's right edge is its time anchor. A thin accent rail flush to that
+     edge makes "right edge = this note's timestamp" legible, so variable-width
+     and image cards still read as right→newest, left→older at a glance. */
+  .time-anchor {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    right: 2px;
+    width: 2px;
+    border-radius: 1px;
+    background: var(--accent);
+    opacity: 0.4;
+    pointer-events: none;
+  }
+  .note.head .time-anchor,
+  .note.speaking .time-anchor {
+    opacity: 0.7;
+  }
+
+  /* Compact ⋯ affordance: opens the note's options (full text, mute TTS) that
+     the card click used to open, now that the click opens njump.me instead. */
+  .note-menu-btn {
+    position: absolute;
+    top: 2px;
+    right: 6px;
+    z-index: 2;
+    appearance: none;
+    width: 20px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 5px;
+    background: rgba(0, 0, 0, 0.35);
+    color: var(--text-h);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0.6;
+  }
+  .note-menu-btn:hover,
+  .note-menu-btn:focus-visible {
+    background: var(--accent-bg);
+    color: var(--accent);
+    opacity: 1;
+    outline: none;
   }
 
   .note.head {
@@ -715,11 +839,21 @@
     padding: 8px 4px;
   }
 
-  /* Full-text modal image: larger preview, still capped so it never dominates
-     the dialog. Links out to the original in a new tab. */
+  /* Full-text modal gallery: all of a note's images. A single image gets the
+     full width; multiple images lay out in a responsive grid. Each links out to
+     the original in a new tab. */
+  .modal-gallery {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin: 4px 0;
+  }
+  .modal-gallery.multi {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
   .modal-image {
     display: block;
-    margin: 4px 0;
     border-radius: 8px;
     overflow: hidden;
   }
@@ -729,5 +863,9 @@
     width: 100%;
     max-height: 320px;
     object-fit: contain;
+  }
+  .modal-gallery.multi .modal-image img {
+    max-height: 200px;
+    object-fit: cover;
   }
 </style>
