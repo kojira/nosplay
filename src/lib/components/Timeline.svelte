@@ -29,6 +29,16 @@
   const AUTHOR_FONT = 12; // .note .author font-size
   const GAP_PX = 8; // base horizontal gap reserved between adjacent notes
   const LANE_BUFFER_PX = 12; // extra cushion so same-lane neighbours never kiss
+  // Vertical footprint, in lanes, that a card occupies for collision avoidance.
+  // A plain text card is capped to a single lane by CSS (.note max-height:
+  // calc((100%/6) - 8px)). An image card is image-first and intentionally taller
+  // — it occupies IMG_LANE_SPAN consecutive lanes. The placement reserves that
+  // many lanes (so other cards never overlap the image region) AND never starts
+  // an image card lower than LANES - IMG_LANE_SPAN (so it can't overflow the
+  // bottom edge). The CSS .note.has-image max-height MUST match this span
+  // (currently 2 lanes); changing one without the other reintroduces overlap.
+  const TEXT_LANE_SPAN = 1;
+  const IMG_LANE_SPAN = 2;
   // Fallback fraction used before the container width is measured. Leans
   // conservative (wide) so the un-measured first frame never packs notes too
   // tightly; once containerW is known the per-note estimate takes over.
@@ -210,19 +220,43 @@
   let laneFeedVersion = -1;
 
   /**
-   * Pick a lane for a note not yet in the cache. Deterministic given the lanes'
-   * current free times: prefer the author's previous lane when it's free, else
-   * the lane that frees soonest (least overlap). Never reassigns an existing
-   * note, so it cannot cause vertical bounce.
+   * Pick a starting lane for a note not yet in the cache, reserving `span`
+   * consecutive lanes (1 for text, IMG_LANE_SPAN for an image card). The card
+   * occupies lanes [start .. start+span-1], so:
+   *   - `start` is constrained to 0 .. LANES-span, which guarantees the card's
+   *     bottom never falls past the last lane (no bottom overflow);
+   *   - a block is "free" only when ALL its lanes are free at `ms`, so a taller
+   *     image card can't be slotted on top of a neighbour it would overlap.
+   * Deterministic: prefer the author's previous lane when its block is free,
+   * else the lowest fully-free block, else the block that frees soonest (least
+   * overlap). Never reassigns an existing note, so it cannot cause vertical
+   * bounce. For span === 1 this reduces to the previous lowest-free behaviour.
    */
-  function chooseLane(laneFreeAt: number[], ms: number, preferred: number | undefined): number {
-    if (preferred !== undefined && laneFreeAt[preferred] <= ms) return preferred;
+  function chooseLane(
+    laneFreeAt: number[],
+    ms: number,
+    preferred: number | undefined,
+    span: number,
+  ): number {
+    const maxStart = LANES - span;
+    // Latest free-time across a span-wide block starting at `s` (the block is
+    // free for a new note only once its busiest lane has freed).
+    const blockFreeAt = (s: number): number => {
+      let f = -Infinity;
+      for (let i = s; i < s + span; i++) if (laneFreeAt[i] > f) f = laneFreeAt[i];
+      return f;
+    };
+    if (preferred !== undefined && preferred <= maxStart && blockFreeAt(preferred) <= ms) {
+      return preferred;
+    }
     let lane = 0;
-    let best = laneFreeAt[0];
-    for (let i = 1; i < LANES; i++) {
-      if (laneFreeAt[i] < best) {
-        best = laneFreeAt[i];
-        lane = i;
+    let best = Infinity;
+    for (let s = 0; s <= maxStart; s++) {
+      const f = blockFreeAt(s);
+      if (f <= ms) return s; // lowest fully-free block
+      if (f < best) {
+        best = f;
+        lane = s;
       }
     }
     return lane;
@@ -263,12 +297,18 @@
       // Computed once and reused for both the width estimate and the rendered
       // card text (keeps the two in sync); the modal re-derives from raw content.
       const display = cardText(formatNoteContent(note.content, note.tags), images);
+      // Vertical footprint in lanes: an image card is taller (image-first) and
+      // occupies IMG_LANE_SPAN consecutive lanes; a text card occupies one. The
+      // span drives both how many lanes we reserve (so neighbours don't overlap
+      // the taller image region) and how low the card may start (so it can't
+      // overflow the bottom edge) — see chooseLane.
+      const span = images.length > 0 ? IMG_LANE_SPAN : TEXT_LANE_SPAN;
       // Reuse the note's existing lane when known; only assign one the first
       // time we see it. New notes fit around the lanes already occupied this
       // pass, so overlaps stay reasonable while existing rows stay put.
       let lane = laneByNote.get(note.id);
       if (lane === undefined) {
-        lane = chooseLane(laneFreeAt, ms, laneByAuthor.get(note.pubkey));
+        lane = chooseLane(laneFreeAt, ms, laneByAuthor.get(note.pubkey), span);
         laneByNote.set(note.id, lane);
       }
       laneByAuthor.set(note.pubkey, lane);
@@ -280,7 +320,11 @@
       const busyMs = measured
         ? win * Math.min((estNotePx(name(note), display, maxNotePx, images.length > 0) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
         : win * FALLBACK_BUSY_FRACTION;
-      laneFreeAt[lane] = ms + busyMs;
+      // Reserve every lane this card spans vertically, so a taller image card
+      // holds its whole footprint busy for that time and nothing is placed over
+      // it. `lane + span <= LANES` is guaranteed by chooseLane.
+      const freeAt = ms + busyMs;
+      for (let i = lane; i < lane + span; i++) laneFreeAt[i] = freeAt;
       out.push({
         note,
         f,
@@ -751,13 +795,16 @@
     margin-bottom: 1px;
   }
 
-  /* Let an image card grow a little past the per-lane cap so the picture keeps
-     a real preferred height instead of collapsing to a thin strip on short
-     lanes. Bounded (extra ≈ one lane, hard-capped at 320px) so the card never
-     dominates the timeline or breaks the left-edge time anchoring / lane
-     layout — only its own vertical footprint changes. */
+  /* An image card is image-first and spans IMG_LANE_SPAN (2) lanes. This height
+     MUST stay in lockstep with that JS span (see IMG_LANE_SPAN in the script):
+     two lanes tall, minus the same 8px inter-lane gap a text card leaves. The
+     lane placement reserves both lanes (so neighbours never overlap the picture)
+     and never starts an image card below lane LANES-2, so this 2-lane height can
+     never intrude into a lower lane or overflow the bottom edge. The picture
+     still keeps a real, readable size while its footprint is fully accounted
+     for by collision avoidance. */
   .note.has-image {
-    max-height: min(320px, calc((100% / 6) + 120px));
+    max-height: calc((100% / 6) * 2 - 8px);
   }
 
   /* Inline image preview: a tap-to-enlarge thumbnail kept well within the card.

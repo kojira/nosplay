@@ -50,12 +50,15 @@ This project was built to fulfill the [requirements document (要件書)](https:
   than rendering blank — the full, unmodified text (URLs included) is still in
   the **⋯ → Show full post text** modal. The thumbnail is sized to be
   **comfortably readable** (it scales with the viewport height and fills the
-  available lane), and image cards are allowed to grow a little taller than a
-  plain text card so the picture keeps a real size. The thumbnail box has a
-  preferred height but **shrinks before the card clips it**,
-  so even on short lanes the bottom of the image is never cut off; its rendered
-  width still tracks the image so the lane layout (which reserves a little extra
-  horizontal room for image cards) is unchanged.
+  available lanes). Because an image card is image-first it is **taller than a
+  plain text card — it spans two lanes** instead of one, and the lane placement
+  **reserves that full two-lane footprint**: other cards are never laid over the
+  picture, and an image card is never started low enough to spill past the bottom
+  edge, so image cards neither overlap their neighbours nor overflow the screen.
+  The thumbnail box has a preferred height but **shrinks before the card clips
+  it**, so even on short screens the bottom of the image is never cut off; its
+  rendered width still tracks the image so the horizontal lane layout (which also
+  reserves a little extra room for image cards) is unchanged.
   **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
   that shows the image **at up to its native size, downscaled only as much as
   needed to fit the viewport** — a much larger view without leaving the page.
@@ -68,8 +71,12 @@ This project was built to fulfill the [requirements document (要件書)](https:
   glyph.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
   (1×–50×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
-  Catching up to wall-clock now while fast-forwarding automatically snaps back to
-  LIVE. (At very high speeds notes stream past quickly and read-aloud can't keep
+  **Pause genuinely freezes the timeline** — including while LIVE: pausing from
+  LIVE pins the playhead at that instant instead of letting it keep tracking
+  wall-clock now, so the scroll visibly stops. Pressing play resumes from the
+  pause point and replays forward at the chosen speed, catching back up to the
+  live edge (DVR-style). Catching up to wall-clock now while fast-forwarding
+  automatically snaps back to LIVE. (At very high speeds notes stream past quickly and read-aloud can't keep
   up with every note; TTS keeps only the most recent backlog so it never jams.)
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
   `datetime-local` **Jump to** field: pick any past moment, then press **Jump**

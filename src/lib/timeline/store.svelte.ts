@@ -1265,11 +1265,26 @@ export class TimelineStore {
   play(): void {
     this.isPlaying = true;
   }
+  /**
+   * Freeze the visible timeline. Pause must actually STOP the scroll, so when
+   * pausing from LIVE we also drop live-follow (isLive=false) and pin the
+   * playhead at the current edge — otherwise #step keeps setting
+   * playheadMs = now every frame and the timeline appears to keep scrolling
+   * despite "paused". With isLive=false and isPlaying=false, #step is a no-op,
+   * so the playhead is held still. Resuming (play) then replays forward from
+   * the pause point at `speed`, catching back up to the live edge — DVR-style.
+   */
   pause(): void {
+    if (this.isLive) {
+      this.isLive = false;
+      this.playheadMs = Date.now();
+      this.#scheduleSave();
+    }
     this.isPlaying = false;
   }
   togglePlay(): void {
-    this.isPlaying = !this.isPlaying;
+    if (this.isPlaying) this.pause();
+    else this.play();
   }
 
   /** Shift the playhead by deltaMs (e.g. -60000 / +60000). Turns LIVE off; clamps. */
