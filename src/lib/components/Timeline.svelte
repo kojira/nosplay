@@ -279,14 +279,21 @@
   // Run the pure 2D packer. Re-packs whenever layoutInputs changes (visible set,
   // measurements, container size, time). yCache freezes each note's y for its
   // lifetime (C4); the packer only ever assigns/keeps y, never x (C5).
+  // Drop the y-cache, bound elements, and measurements when the feed was torn
+  // down and rebuilt. This runs in an $effect (not inside the packer derived) so
+  // we never reassign state during derivation, which Svelte rejects with
+  // state_unsafe_mutation. Clearing `measured` here produces a new ref, which
+  // re-derives layoutInputs and re-runs the packer against the cleared yCache —
+  // the same fresh re-pack the inline reset used to perform, just safely.
+  $effect(() => {
+    if (timeline.feedVersion === layoutFeedVersion) return;
+    layoutFeedVersion = timeline.feedVersion;
+    yCache.clear();
+    cardEls.clear();
+    measured = new Map();
+  });
+
   const packed = $derived.by<PlacedItem[]>(() => {
-    // Drop the y-cache and measurements when the feed was torn down and rebuilt.
-    if (timeline.feedVersion !== layoutFeedVersion) {
-      yCache.clear();
-      cardEls.clear();
-      measured = new Map();
-      layoutFeedVersion = timeline.feedVersion;
-    }
     const H = containerH > 0 ? containerH : 600; // sane fallback pre-measure
     return packTimeline(layoutInputs, H, yCache);
   });
