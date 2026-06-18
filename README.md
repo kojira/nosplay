@@ -50,10 +50,15 @@ This project was built to fulfill the [requirements document (要件書)](https:
   LIVE. (At very high speeds notes stream past quickly and read-aloud can't keep
   up with every note; TTS keeps only the most recent backlog so it never jams.)
 - **Time navigation** — window-size selector (1 min – 1 hour) and a
-  `datetime-local` **Jump to** field: pick a moment, then press **Jump** to seek
-  to it within the loaded history. Editing the field never moves the playhead on
-  its own — the seek happens only on confirm — and jumping to a past moment
-  pauses playback there rather than auto-playing on.
+  `datetime-local` **Jump to** field: pick any past moment, then press **Jump**
+  to seek to it. If the chosen time predates the loaded history (e.g. a date last
+  year), nosplay pages in the older notes needed to reach it — querying the relays
+  with an `until` bound until the oldest loaded note is at or before the target —
+  rather than snapping back to the earliest loaded note; the button shows
+  **Loading…** while it fetches. Editing the field never moves the playhead on its
+  own — the seek happens only on confirm — and jumping to a past moment pauses
+  playback there rather than auto-playing on. (The seek slider and ±1m nudge still
+  move only within the currently loaded range.)
 - **Shareable range links** — a **🔗 Share** button copies a link to the view
   you are looking at. Opening that link reproduces the same time range (see
   [Share links](#share-links)).
@@ -172,8 +177,9 @@ at `end`. Opening a link:
 - pauses (the link is a **fixed** range — sharing while LIVE captures the moment
   you clicked, not a moving "now"); if `end` is at or beyond the current time it
   snaps back to **LIVE** instead;
-- **overrides** persisted playback for that load, and clamps the playhead into
-  the loaded history once it arrives.
+- **overrides** persisted playback for that load. If the shared moment predates
+  the loaded history, nosplay pages in the older notes needed to reach it (the
+  same deep-history fetch as a **Jump**) before settling the playhead there.
 
 When neither param is present the app behaves exactly as before (restoring your
 persisted playback / starting live). `start` alone is treated as a bare jump

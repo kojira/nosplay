@@ -262,15 +262,16 @@
 
   /**
    * Apply the drafted "Jump to" datetime. Only runs on an explicit confirm, so
-   * picking a time never moves the playhead on its own. seekTo clamps into
-   * [earliestMs, now] and re-enters LIVE if the target is at/after now; for a
-   * past target we stop playback at that moment rather than auto-playing on.
-   * Clearing jumpEdited lets the playhead mirror resume from the new position.
+   * picking a time never moves the playhead on its own. jumpTo re-enters LIVE if
+   * the target is at/after now; for a past target it loads any history needed to
+   * reach it (so a year-old date is no longer snapped to the loaded range) and
+   * stops playback at that moment rather than auto-playing on. Clearing jumpEdited
+   * lets the playhead mirror resume from the new position once the seek lands.
    */
-  function confirmJump(): void {
+  async function confirmJump(): Promise<void> {
     const ms = new Date(jumpValue).getTime();
     if (!Number.isFinite(ms)) return;
-    timeline.seekTo(ms);
+    await timeline.jumpTo(ms);
     if (!timeline.isLive) timeline.pause();
     jumpEdited = false;
   }
@@ -540,20 +541,22 @@
         <label class="field jump">
           <span>Jump to</span>
           <div class="jump-row">
+            <!-- No `min`: any past moment is selectable. A target older than the
+                 loaded history triggers a deep-history fetch on confirm rather
+                 than snapping back to the earliest loaded note. -->
             <input
               type="datetime-local"
               bind:value={jumpValue}
-              min={toLocalInput(timeline.earliestMs)}
               max={toLocalInput(nowMs)}
               oninput={() => (jumpEdited = true)}
             />
             <button
               type="button"
               onclick={confirmJump}
-              disabled={!jumpValid}
-              title="Seek the playhead to the chosen time (stops playback)"
+              disabled={!jumpValid || timeline.historyLoading}
+              title="Seek the playhead to the chosen time (loads older history if needed; stops playback)"
             >
-              Jump
+              {timeline.historyLoading ? 'Loading…' : 'Jump'}
             </button>
           </div>
         </label>

@@ -271,6 +271,14 @@ export type FollowStatus = 'idle' | 'resolving' | 'ready' | 'empty' | 'error';
 const MAX_NOTES = 5000;
 const DEFAULT_WINDOW_MS = 300_000; // 5 minutes
 const HISTORY_LIMIT = 500;
+/**
+ * Safety cap on how many older-history pages a single deep-jump may fetch before
+ * giving up, so an unreachable target (or a relay that keeps returning full
+ * pages) can never loop forever. A direct `until = target` query normally lands
+ * in one page; the rest are only needed when the first page doesn't reach back
+ * far enough.
+ */
+const DEEP_HISTORY_MAX_ROUNDS = 20;
 const LIVE_GLOBAL_LIMIT = 200;
 /** Max live notes buffered for TTS; older ones are dropped during a flood. */
 const TTS_QUEUE_MAX = 50;
@@ -326,6 +334,12 @@ export class TimelineStore {
    */
   feedVersion = $state<number>(0);
   earliestMs = $state<number>(Date.now());
+  /**
+   * True while a deep-past jump is paging older history from the relays (see
+   * jumpTo / ensureHistoryFor). Surfaced in the UI so the Jump control can show
+   * progress and reject overlapping jumps.
+   */
+  historyLoading = $state<boolean>(false);
   names = $state<Map<string, ProfileMeta>>(new Map());
   error = $state<string | null>(null);
 
@@ -665,8 +679,9 @@ export class TimelineStore {
 
     try {
       await this.#fetchHistory(authors, relays);
-      // Now that earliestMs reflects real history, clamp the restored playhead.
-      this.#applyPendingPlayhead();
+      // Now that earliestMs reflects real history, settle the restored playhead
+      // (fetching deeper history first if it lands before the loaded range).
+      await this.#applyPendingPlayhead();
       this.#subscribeLive(authors, relays);
       this.status = this.mode === 'follows' ? 'live' : 'limited';
     } catch {
@@ -853,22 +868,31 @@ export class TimelineStore {
   }
 
   /** Apply a restored paused playhead once real history (earliestMs) is known. */
-  #applyPendingPlayhead(): void {
+  async #applyPendingPlayhead(): Promise<void> {
     if (this.#pendingPlayheadMs === null) return;
     const ms = this.#pendingPlayheadMs;
     this.#pendingPlayheadMs = null;
-    // Still paused? clamp into the loaded range. If the user already went LIVE
-    // or seeked during the await, leave their choice alone.
-    if (!this.isLive) {
-      const now = Date.now();
-      this.playheadMs = clamp(ms, this.earliestMs, now);
-      // Mirror seekTo: a target at/beyond now means "follow live" — relevant for
-      // share links whose end is the current edge (a restored paused playhead is
-      // always in the past, so this never flips it).
-      if (this.playheadMs >= now) {
-        this.isLive = true;
-        this.isPlaying = true;
-      }
+    // If the user already went LIVE or seeked during the await, leave their
+    // choice alone.
+    if (this.isLive) return;
+    const now = Date.now();
+    // The restored/shared target predates the loaded history (the initial fetch
+    // only grabs the newest page). Sit there provisionally — so the note cap
+    // keeps the target region, not the live tail — and page older history in
+    // before clamping, exactly like an explicit jumpTo.
+    if (ms < this.earliestMs) {
+      this.isPlaying = false;
+      this.playheadMs = clamp(ms, 0, now);
+      await this.ensureHistoryFor(ms);
+      if (this.isLive) return; // user went LIVE mid-fetch
+    }
+    this.playheadMs = clamp(ms, this.earliestMs, now);
+    // Mirror seekTo: a target at/beyond now means "follow live" — relevant for
+    // share links whose end is the current edge (a restored paused playhead is
+    // always in the past, so this never flips it).
+    if (this.playheadMs >= now) {
+      this.isLive = true;
+      this.isPlaying = true;
     }
   }
 
@@ -961,9 +985,22 @@ export class TimelineStore {
     }
     arr.splice(lo, 0, note);
 
-    // Cap from the front (oldest) if over the limit.
+    // Cap the buffer. Drop notes from whichever edge is FARTHER from the
+    // playhead, so the notes around the current view always survive — including a
+    // deep-past jump target whose freshly-fetched batch is the oldest in the
+    // array. When live or near the live edge (the common case) the playhead sits
+    // at the new edge, so this drops the oldest, exactly as before.
     if (arr.length > MAX_NOTES) {
-      const removed = arr.splice(0, arr.length - MAX_NOTES);
+      const overflow = arr.length - MAX_NOTES;
+      const head = this.playheadMs;
+      const oldestMs = arr[0].created_at * 1000;
+      const newestMs = arr[arr.length - 1].created_at * 1000;
+      const removed =
+        newestMs - head > head - oldestMs
+          ? // Playhead nearer the old edge (paused in the past): drop the newest.
+            arr.splice(arr.length - overflow, overflow)
+          : // Playhead at/near the live edge (normal/live): drop the oldest.
+            arr.splice(0, overflow);
       for (const r of removed) this.#ids.delete(r.id);
     }
 
@@ -1231,6 +1268,92 @@ export class TimelineStore {
     this.playheadMs = clamp(ms, this.earliestMs, now);
     if (this.playheadMs >= now) {
       this.isLive = true;
+    }
+    this.#scheduleSave();
+  }
+
+  /**
+   * Page older history from the current relays until the oldest loaded note is
+   * at or before `targetMs`, the relays run dry, or the safety round cap is hit.
+   *
+   * The first query goes straight to the target neighbourhood (`until = target`),
+   * so a jump to e.g. 2023 lands in one round instead of paging through every
+   * intervening note. Events are appended via addNote (dedup + sorted insert), so
+   * a target far from the loaded range just adds a cluster around it — the gap to
+   * the recent notes is harmless because only the visible window renders. Stops
+   * as soon as earliestMs reaches the target so we never over-fetch.
+   */
+  async ensureHistoryFor(targetMs: number): Promise<void> {
+    if (this.earliestMs <= targetMs) return;
+    const authors = this.mode === 'follows' ? this.#followAuthors : FALLBACK_AUTHORS;
+    if (authors.length === 0) return; // nothing to query against
+    const relays = this.activeReadRelays;
+
+    this.historyLoading = true;
+    try {
+      // Seconds-precision upper bound; query notes at/older than the target.
+      let until = Math.floor(targetMs / 1000);
+      for (let round = 0; round < DEEP_HISTORY_MAX_ROUNDS; round++) {
+        if (this.earliestMs <= targetMs || until <= 0) break;
+        let events: Event[];
+        try {
+          events = await pool.querySync(relays, {
+            kinds: [1],
+            authors,
+            until,
+            limit: HISTORY_LIMIT,
+          });
+        } catch {
+          break; // relay error: keep whatever we already have
+        }
+        if (events.length === 0) break; // nothing older exists
+
+        const before = this.earliestMs;
+        let oldest = until;
+        for (const e of events) {
+          this.addNote(e);
+          if (e.created_at < oldest) oldest = e.created_at;
+        }
+        // A short page means the relays have no more older notes for these
+        // authors; no point asking again.
+        if (events.length < HISTORY_LIMIT) break;
+        // No forward progress (every event was a duplicate) — avoid a tight loop.
+        if (this.earliestMs >= before) break;
+        // Page further back, strictly older than the oldest event seen.
+        until = oldest - 1;
+      }
+    } finally {
+      this.historyLoading = false;
+    }
+  }
+
+  /**
+   * Seek to an absolute epoch-ms, fetching deeper history first when the target
+   * predates the loaded range. Unlike seekTo (which clamps into the currently
+   * loaded range), this is the path for an explicit Jump to an arbitrary past
+   * moment: it loads the notes needed to reach the target, then settles there
+   * paused. Targets at/after the loaded edge behave exactly like seekTo, so LIVE
+   * catch-up is preserved.
+   */
+  async jumpTo(ms: number): Promise<void> {
+    const now = Date.now();
+    // Future / at-now / within loaded range: identical to a plain seek.
+    if (ms >= this.earliestMs) {
+      this.seekTo(ms);
+      return;
+    }
+    // Deep past: settle at the target provisionally (so the note cap keeps the
+    // target region while paging), load history, then clamp into the now-wider
+    // range. Paused so the rAF clock doesn't drift the playhead during the fetch.
+    this.isLive = false;
+    this.isPlaying = false;
+    this.#stopSpeech();
+    this.playheadMs = clamp(ms, 0, now);
+    await this.ensureHistoryFor(ms);
+    this.playheadMs = clamp(ms, this.earliestMs, now);
+    if (this.playheadMs >= now) {
+      this.isLive = true;
+      this.isPlaying = true;
     }
     this.#scheduleSave();
   }
