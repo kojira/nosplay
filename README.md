@@ -16,6 +16,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   newest at the right edge (the playhead = current time). Each note shows the
   author's avatar and display name (resolved from kind:0 metadata, with an
   npub fallback), and long posts wrap and clamp instead of being truncated.
+  Legacy NIP-08 positional mentions (a `#[i]` token pointing at an `e`/`p` tag)
+  are rewritten to a compact `[mention: note1…]` / `[mention: npub1…]` label —
+  both in the card and the full-text modal — instead of showing a raw `#[0]`.
   Each note keeps a stable vertical lane for its lifetime (assigned once, keyed
   to its identity/author), so notes scroll horizontally without bouncing up and
   down as the visible window slides. A card's **left edge is its exact time

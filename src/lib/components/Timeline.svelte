@@ -2,6 +2,7 @@
   import { timeline } from '../timeline/store.svelte';
   import { shortNpub } from '../timeline/format';
   import { getNoteImageUrls } from '../nostr/images';
+  import { formatNoteContent } from '../nostr/mentions';
   import { njumpUrl } from '../nostr/njump';
   import type { ProfileMeta } from '../nostr/profiles';
   import type { Note } from '../nostr/types';
@@ -151,6 +152,9 @@
     isMuted: boolean;
     /** Previewable image URLs for this note (computed once per placement pass). */
     images: string[];
+    /** Content with legacy `#[i]` references rewritten to mention labels;
+     *  used for the card text and width estimate (note.content stays raw). */
+    display: string;
   }
 
   // Identity-keyed lane cache. A note keeps the lane it was first assigned for
@@ -215,6 +219,9 @@
       // Resolve image URLs once here, then reuse for both the lane-width
       // estimate and rendering (the template never re-scans the note).
       const images = getNoteImageUrls(note);
+      // Rewrite legacy `#[i]` mentions once here, then reuse for both the
+      // width estimate and the rendered card text (keeps the two in sync).
+      const display = formatNoteContent(note.content, note.tags);
       // Reuse the note's existing lane when known; only assign one the first
       // time we see it. New notes fit around the lanes already occupied this
       // pass, so overlaps stay reasonable while existing rows stay put.
@@ -230,7 +237,7 @@
       // Content-aware (vs. the old single MAX width for every note): short notes
       // free their lane sooner, wide notes hold it longer so they can't collide.
       const busyMs = measured
-        ? win * Math.min((estNotePx(name(note), note.content, maxNotePx, images.length > 0) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
+        ? win * Math.min((estNotePx(name(note), display, maxNotePx, images.length > 0) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
         : win * FALLBACK_BUSY_FRACTION;
       laneFreeAt[lane] = ms + busyMs;
       out.push({
@@ -241,6 +248,7 @@
         isSpeaking: note.id === speakingId,
         isMuted: muted.has(note.pubkey),
         images,
+        display,
       });
     }
     return out;
@@ -412,7 +420,7 @@
         </span>
         <span class="author">{name(p.note)}</span>
       </div>
-      <span class="content">{p.note.content}</span>
+      <span class="content">{p.display}</span>
       {#if p.images.length > 0}
         <span class="note-image">
           <img
@@ -471,7 +479,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Full post text" onclick={(e) => e.stopPropagation()}>
         <div class="modal-head">{name(fullTextNote)}</div>
-        <div class="modal-body">{fullTextNote.content}</div>
+        <div class="modal-body">{formatNoteContent(fullTextNote.content, fullTextNote.tags)}</div>
         {#if imageUrls(fullTextNote).length > 0}
           <div class="modal-gallery" class:multi={imageUrls(fullTextNote).length > 1}>
             {#each imageUrls(fullTextNote) as src (src)}
