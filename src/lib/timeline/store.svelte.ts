@@ -272,13 +272,23 @@ const MAX_NOTES = 5000;
 const DEFAULT_WINDOW_MS = 300_000; // 5 minutes
 const HISTORY_LIMIT = 500;
 /**
- * Safety cap on how many older-history pages a single deep-jump may fetch before
- * giving up, so an unreachable target (or a relay that keeps returning full
- * pages) can never loop forever. A direct `until = target` query normally lands
- * in one page; the rest are only needed when the first page doesn't reach back
- * far enough.
+ * Safety cap on how many older-history pages the deep-jump FALLBACK may fetch
+ * before giving up, so an unreachable target (or a relay that keeps returning
+ * full pages) can never loop forever. The primary deep-jump path is now a single
+ * bounded target-range query (see #fetchTargetRange); this `until`-only paging
+ * loop only runs as a fallback when that range comes back empty (a sparse slice
+ * for these authors), to land the jump at the nearest available older notes.
  */
 const DEEP_HISTORY_MAX_ROUNDS = 20;
+/**
+ * Extra backfill BEFORE the visible window when fetching a deep-jump target
+ * range. The visible window is `[target - windowMs, target]`; we widen the
+ * query's `since` by this margin so a few notes that predate the window are
+ * loaded too. That keeps `earliestMs` at/below `target - windowMs` (so the
+ * window's left edge has notes anchoring it rather than abruptly ending at the
+ * oldest fetched note) and gives the left-edge anchoring something to bite on.
+ */
+const TARGET_RANGE_ANCHOR_MS = DEFAULT_WINDOW_MS; // one extra window of backfill
 const LIVE_GLOBAL_LIMIT = 200;
 /** Max live notes buffered for TTS; older ones are dropped during a flood. */
 const TTS_QUEUE_MAX = 50;
@@ -878,8 +888,8 @@ export class TimelineStore {
     const now = Date.now();
     // The restored/shared target predates the loaded history (the initial fetch
     // only grabs the newest page). Sit there provisionally — so the note cap
-    // keeps the target region, not the live tail — and page older history in
-    // before clamping, exactly like an explicit jumpTo.
+    // keeps the target region, not the live tail — and fetch the target-range
+    // slice before clamping, exactly like an explicit jumpTo.
     if (ms < this.earliestMs) {
       this.isPlaying = false;
       this.playheadMs = clamp(ms, 0, now);
@@ -1273,15 +1283,27 @@ export class TimelineStore {
   }
 
   /**
-   * Page older history from the current relays until the oldest loaded note is
-   * at or before `targetMs`, the relays run dry, or the safety round cap is hit.
+   * Load the history needed to render a deep-past jump target.
    *
-   * The first query goes straight to the target neighbourhood (`until = target`),
-   * so a jump to e.g. 2023 lands in one round instead of paging through every
-   * intervening note. Events are appended via addNote (dedup + sorted insert), so
-   * a target far from the loaded range just adds a cluster around it — the gap to
-   * the recent notes is harmless because only the visible window renders. Stops
-   * as soon as earliestMs reaches the target so we never over-fetch.
+   * The playhead is the RIGHT edge of the visible window, so a jump to `targetMs`
+   * needs the slice `[target - windowMs, target]` (plus a little backfill before
+   * it). Rather than paging the newest notes downward from the live tail, we
+   * issue ONE bounded query that asks the relays directly for that slice:
+   *
+   *   { kinds:[1], authors, since: target - windowMs - anchor, until: target }
+   *
+   * so a jump to e.g. 2023 fetches the 2023 window in a single round — the
+   * `since` bound makes the relays return notes inside the target window instead
+   * of the 500 newest notes that merely happen to precede `until`. Events are
+   * appended via addNote (dedup + sorted insert), which leaves `earliestMs` at
+   * the oldest fetched note (at/below `target - windowMs` thanks to the anchor)
+   * so the window's left edge is anchored coherently.
+   *
+   * Fallback: if that bounded slice is empty (the authors posted nothing in that
+   * span), fall back to the older-only paging loop so the jump still lands at the
+   * nearest available older notes instead of snapping to the live tail.
+   *
+   * No-op when the loaded range already reaches the target.
    */
   async ensureHistoryFor(targetMs: number): Promise<void> {
     if (this.earliestMs <= targetMs) return;
@@ -1291,36 +1313,12 @@ export class TimelineStore {
 
     this.historyLoading = true;
     try {
-      // Seconds-precision upper bound; query notes at/older than the target.
-      let until = Math.floor(targetMs / 1000);
-      for (let round = 0; round < DEEP_HISTORY_MAX_ROUNDS; round++) {
-        if (this.earliestMs <= targetMs || until <= 0) break;
-        let events: Event[];
-        try {
-          events = await pool.querySync(relays, {
-            kinds: [1],
-            authors,
-            until,
-            limit: HISTORY_LIMIT,
-          });
-        } catch {
-          break; // relay error: keep whatever we already have
-        }
-        if (events.length === 0) break; // nothing older exists
-
-        const before = this.earliestMs;
-        let oldest = until;
-        for (const e of events) {
-          this.addNote(e);
-          if (e.created_at < oldest) oldest = e.created_at;
-        }
-        // A short page means the relays have no more older notes for these
-        // authors; no point asking again.
-        if (events.length < HISTORY_LIMIT) break;
-        // No forward progress (every event was a duplicate) — avoid a tight loop.
-        if (this.earliestMs >= before) break;
-        // Page further back, strictly older than the oldest event seen.
-        until = oldest - 1;
+      const got = await this.#fetchTargetRange(targetMs, authors, relays);
+      // If the direct slice yielded nothing AND we still haven't reached the
+      // target, the window around `target` is empty for these authors. Fall back
+      // to paging older notes so the jump lands at the nearest available point.
+      if (!got && this.earliestMs > targetMs) {
+        await this.#fetchOlderUntil(targetMs, authors, relays);
       }
     } finally {
       this.historyLoading = false;
@@ -1328,12 +1326,88 @@ export class TimelineStore {
   }
 
   /**
+   * Fetch the visible-window slice for a jump target in one bounded query and add
+   * the events. Returns true if any events came back.
+   *
+   * The `until` bound is the target itself; the `since` bound is the window's
+   * left edge widened by TARGET_RANGE_ANCHOR_MS, so the result covers
+   * `[target - windowMs - anchor, target]`. Caller owns the historyLoading flag.
+   */
+  async #fetchTargetRange(
+    targetMs: number,
+    authors: string[],
+    relays: string[],
+  ): Promise<boolean> {
+    const sinceMs = targetMs - this.windowMs - TARGET_RANGE_ANCHOR_MS;
+    let events: Event[];
+    try {
+      events = await pool.querySync(relays, {
+        kinds: [1],
+        authors,
+        since: Math.max(0, Math.floor(sinceMs / 1000)),
+        until: Math.floor(targetMs / 1000),
+        limit: HISTORY_LIMIT,
+      });
+    } catch {
+      return false; // relay error: keep whatever we already have
+    }
+    for (const e of events) this.addNote(e);
+    return events.length > 0;
+  }
+
+  /**
+   * Fallback for an empty target slice: page older history (`until`-only) until
+   * the oldest loaded note is at or before `targetMs`, the relays run dry, or the
+   * safety round cap is hit. Used only when #fetchTargetRange found nothing in the
+   * window, so a deep jump into a sparse span still lands near real notes rather
+   * than snapping to the live tail. Caller owns the historyLoading flag.
+   */
+  async #fetchOlderUntil(
+    targetMs: number,
+    authors: string[],
+    relays: string[],
+  ): Promise<void> {
+    // Seconds-precision upper bound; query notes at/older than the target.
+    let until = Math.floor(targetMs / 1000);
+    for (let round = 0; round < DEEP_HISTORY_MAX_ROUNDS; round++) {
+      if (this.earliestMs <= targetMs || until <= 0) break;
+      let events: Event[];
+      try {
+        events = await pool.querySync(relays, {
+          kinds: [1],
+          authors,
+          until,
+          limit: HISTORY_LIMIT,
+        });
+      } catch {
+        break; // relay error: keep whatever we already have
+      }
+      if (events.length === 0) break; // nothing older exists
+
+      const before = this.earliestMs;
+      let oldest = until;
+      for (const e of events) {
+        this.addNote(e);
+        if (e.created_at < oldest) oldest = e.created_at;
+      }
+      // A short page means the relays have no more older notes for these
+      // authors; no point asking again.
+      if (events.length < HISTORY_LIMIT) break;
+      // No forward progress (every event was a duplicate) — avoid a tight loop.
+      if (this.earliestMs >= before) break;
+      // Page further back, strictly older than the oldest event seen.
+      until = oldest - 1;
+    }
+  }
+
+  /**
    * Seek to an absolute epoch-ms, fetching deeper history first when the target
    * predates the loaded range. Unlike seekTo (which clamps into the currently
    * loaded range), this is the path for an explicit Jump to an arbitrary past
-   * moment: it loads the notes needed to reach the target, then settles there
-   * paused. Targets at/after the loaded edge behave exactly like seekTo, so LIVE
-   * catch-up is preserved.
+   * moment: it issues a direct target-range query (via ensureHistoryFor) for the
+   * slice around the target's visible window, then settles there paused. Targets
+   * at/after the loaded edge behave exactly like seekTo, so LIVE catch-up is
+   * preserved.
    */
   async jumpTo(ms: number): Promise<void> {
     const now = Date.now();
