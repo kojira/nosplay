@@ -8,6 +8,11 @@
   import { aiBgVerdict } from './lib/timeline/store.svelte';
   import type { RelayMode } from './lib/timeline/store.svelte';
 
+  // Module-level (survives component instances): a pending disconnect scheduled
+  // by onDestroy(). On an immediate remount, onMount() cancels it so the
+  // singleton timeline's sockets/feed are not torn down and rebuilt needlessly.
+  let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
   // ---- local UI state --------------------------------------------------
   // A ticking "now" used for the seek slider max and the datetime-local max.
   let nowMs = $state(Date.now());
@@ -329,6 +334,15 @@
   let nowTimer: ReturnType<typeof setInterval> | undefined;
 
   onMount(() => {
+    // A transient unmount/remount (e.g. a viewport/orientation change) fires
+    // onDestroy()->onMount() back-to-back. onDestroy schedules disconnect() on a
+    // short timer instead of running it synchronously; if we remount before it
+    // fires we cancel it here, so the (singleton) sockets/feed survive the churn.
+    // A real page exit lets the timer elapse and disconnect normally.
+    if (disconnectTimer) {
+      clearTimeout(disconnectTimer);
+      disconnectTimer = null;
+    }
     nowTimer = setInterval(() => {
       nowMs = Date.now();
     }, 250);
@@ -344,8 +358,15 @@
   onDestroy(() => {
     if (nowTimer) clearInterval(nowTimer);
     if (shareTimer) clearTimeout(shareTimer);
-    // Disconnect on destroy: closes all relay subscriptions and stops the loop.
-    timeline.disconnect();
+    // Disconnect on destroy, but defer it briefly: a transient unmount/remount
+    // (viewport/orientation change) would otherwise tear down the singleton's
+    // sockets and feed only to rebuild them on the immediate remount. onMount()
+    // cancels this timer if we come back; a real page exit lets it elapse.
+    if (disconnectTimer) clearTimeout(disconnectTimer);
+    disconnectTimer = setTimeout(() => {
+      disconnectTimer = null;
+      timeline.disconnect();
+    }, 500);
   });
 </script>
 
@@ -1312,5 +1333,54 @@
   select,
   input[type='datetime-local'] {
     color-scheme: dark;
+  }
+
+  /* ---- mobile / narrow screens ----------------------------------------
+     Desktop layout is unchanged; below ~640px the control groups wrap and the
+     Jump control stacks so the input can grow without squeezing the button out
+     of view. Uses flex-wrap + min-width rather than fixed widths. */
+  @media (max-width: 640px) {
+    /* Let each control group wrap and span the row instead of being crushed. */
+    .group {
+      flex-wrap: wrap;
+    }
+    .group.right {
+      margin-left: 0;
+    }
+    /* Fields take the full row so their selects/inputs aren't squeezed. */
+    .control-row .field {
+      flex: 1 1 100%;
+    }
+    /* Jump: stack the label above the row, and let the row wrap. */
+    .field.jump {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 4px;
+    }
+    .field.jump > span {
+      white-space: normal;
+    }
+    .jump-row {
+      flex-wrap: wrap;
+    }
+    /* The datetime input grows to fill the row; min-width keeps it usable while
+       still allowing the Jump button to wrap onto its own line if needed. */
+    .jump-row input[type='datetime-local'] {
+      flex: 1 1 12rem;
+      min-width: 11rem;
+    }
+    /* Keep the Jump button fully visible and comfortably tappable. */
+    .jump-row button {
+      flex: 0 0 auto;
+      min-height: 38px;
+      padding: 6px 14px;
+    }
+    /* Composer row stacks so the textarea and Post button stay full-width. */
+    .composer-row {
+      flex-wrap: wrap;
+    }
+    .composer {
+      flex: 1 1 100%;
+    }
   }
 </style>
