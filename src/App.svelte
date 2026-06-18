@@ -216,6 +216,24 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
   }
 
+  // ---- "Jump to" datetime-local control --------------------------------
+  // The displayed value tracks the live playhead, but the rAF playback loop
+  // rewrites playheadMs ~60×/s (every frame in LIVE mode, and per frame while
+  // playing through the past). If that stream flows into the input while the
+  // user has the native picker open, every tick clobbers their in-progress
+  // selection and the chosen time can never be confirmed. So we freeze the
+  // input's value while it is focused (picker open) and only resync it from the
+  // playhead once focus leaves. The commit path stays onchange -> seekTo, which
+  // already clamps to [earliestMs, now] and re-enters LIVE at the right edge.
+  let jumpFocused = $state(false);
+  let jumpValue = $state(toLocalInput(Date.now()));
+  $effect(() => {
+    // Track + mirror the playhead only while the field is idle (not being
+    // edited). While focused, jumpValue is left untouched so neither Svelte nor
+    // the playback loop can overwrite the user's selection mid-pick.
+    if (!jumpFocused) jumpValue = toLocalInput(timeline.playheadMs);
+  });
+
   function onSpeedChange(e: Event): void {
     timeline.setSpeed(Number((e.currentTarget as HTMLSelectElement).value));
   }
@@ -512,8 +530,11 @@
           <span>Jump to</span>
           <input
             type="datetime-local"
-            value={toLocalInput(timeline.playheadMs)}
+            value={jumpValue}
+            min={toLocalInput(timeline.earliestMs)}
             max={toLocalInput(nowMs)}
+            onfocus={() => (jumpFocused = true)}
+            onblur={() => (jumpFocused = false)}
             onchange={onJump}
           />
         </label>
