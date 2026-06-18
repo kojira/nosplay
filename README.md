@@ -18,10 +18,10 @@ This project was built to fulfill the [requirements document (要件書)](https:
   npub fallback), and long posts wrap and clamp instead of being truncated.
   Each note keeps a stable vertical lane for its lifetime (assigned once, keyed
   to its identity/author), so notes scroll horizontally without bouncing up and
-  down as the visible window slides. A card's **right edge is its exact time
+  down as the visible window slides. A card's **left edge is its exact time
   anchor**, marked with a thin accent rail, so even though cards have different
   widths (short vs. long text, with/without an image) the timeline always reads
-  right → newest, left → older. Notes posted in the same second are ordered
+  right → newer, left → older. Notes posted in the same second are ordered
   deterministically by event id, so the horizontal layout is stable run-to-run.
 - **Open on njump** — **clicking (or pressing Enter/Space on) a note opens that
   specific event on [njump.me](https://njump.me) in a new tab** (`https://njump.me/<note1…>`,

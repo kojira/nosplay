@@ -7,12 +7,13 @@
   import type { Note } from '../nostr/types';
 
   const LANES = 6; // vertical lanes for the comment stack
-  // Each note is right-anchored at its time and grows leftward into the past,
-  // rendered as a box whose width depends on its content (mirrors the .note
-  // CSS: width:max-content; max-width:min(340px, 60vw)). Two notes on the same
-  // lane visually overlap when the older (further-left) box extends right past
-  // the newer note's anchor, so we keep a lane "busy" for exactly the time span
-  // *that note's own box* occupies at the current zoom (estNotePx → busyMs).
+  // Each note is left-anchored at its time and grows rightward toward the newer
+  // side, rendered as a box whose width depends on its content (mirrors the
+  // .note CSS: width:max-content; max-width:min(340px, 60vw)). Two notes on the
+  // same lane visually overlap when the older (further-left) box extends right
+  // far enough to reach the newer note's anchor, so we keep a lane "busy" for
+  // exactly the time span *that note's own box* occupies forward in time from
+  // its anchor at the current zoom (estNotePx → busyMs).
   // Earlier this reserved the single MAX width for every note, which both
   // over-reserved short notes (wasting lane time) and still let wide notes
   // collide; the per-note, content-aware estimate below replaces that.
@@ -141,7 +142,8 @@
 
   interface Placed {
     note: Note;
-    /** 0 = right edge (playhead), 1 = left edge (window start). */
+    /** 0 = right edge (playhead), 1 = left edge (window start). The card's
+     *  LEFT edge is placed at (1 - f). */
     f: number;
     lane: number;
     isHead: boolean;
@@ -223,6 +225,8 @@
       }
       laneByAuthor.set(note.pubkey, lane);
       // Reserve this lane for exactly the time span this note's own box covers.
+      // The box extends forward (rightward) in time from the note's left-edge
+      // anchor, so reserving up to `ms + busyMs` is exactly right.
       // Content-aware (vs. the old single MAX width for every note): short notes
       // free their lane sooner, wide notes hold it longer so they can't collide.
       const busyMs = measured
@@ -367,15 +371,15 @@
       class:head={p.isHead}
       class:speaking={p.isSpeaking}
       class:muted={p.isMuted}
-      style="right: {p.f * 100}%; top: {(p.lane / LANES) * 100}%;"
+      style="left: {(1 - p.f) * 100}%; top: {(p.lane / LANES) * 100}%;"
       role="button"
       tabindex="0"
       title="Open this note on njump.me (new tab) — use ⋯ for options"
       onclick={() => openNote(p.note)}
       onkeydown={(e) => onNoteKey(e, p.note)}
     >
-      <!-- The card's right edge is its exact time anchor; this rail makes that
-           obvious so variable-width cards still read right→newest. -->
+      <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
+           that left edge so variable-width cards still read right→newer. -->
       <span class="time-anchor" aria-hidden="true"></span>
       <button
         class="note-menu-btn"
@@ -533,12 +537,12 @@
 
   .note {
     position: absolute;
-    /* Right-anchored at the note's time position; content grows leftward into
-       the past, so a note never spills past the playhead (right edge). */
+    /* Left-anchored at the note's time position: the card's left edge is its
+       time anchor and content grows rightward toward the newer side. */
     width: max-content;
     max-width: min(340px, 60vw);
     max-height: calc((100% / 6) - 8px);
-    margin-right: 4px;
+    margin-left: 4px;
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -664,14 +668,15 @@
     pointer-events: none;
   }
 
-  /* The card's right edge is its time anchor. A thin accent rail flush to that
-     edge makes "right edge = this note's timestamp" legible, so variable-width
-     and image cards still read as right→newest, left→older at a glance. */
+  /* The card's left edge is its time anchor. A thin accent rail flush to that
+     edge makes "left edge = this note's timestamp" legible. Cards still read
+     right→newer, left→older — flow direction is unchanged; only the anchored
+     edge moved. */
   .time-anchor {
     position: absolute;
     top: 4px;
     bottom: 4px;
-    right: 2px;
+    left: 2px;
     width: 2px;
     border-radius: 1px;
     background: var(--accent);
