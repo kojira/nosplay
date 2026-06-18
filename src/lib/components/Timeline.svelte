@@ -472,6 +472,14 @@
     if (e.key === 'Escape') close();
   }
 
+  // Close the image lightbox on Escape even when focus is still on the thumbnail
+  // button that opened it (which lives outside the overlay), so a keydown on the
+  // overlay element alone never fires. Scoped to the lightbox only — it no-ops
+  // when the lightbox is closed, leaving the menu/full-text overlays untouched.
+  function onWindowKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && lightboxNote) lightboxNote = null;
+  }
+
   function onNoteKey(e: KeyboardEvent, note: Note): void {
     // Ignore keys that bubbled up from the inner ⋯ button (which has its own
     // activation), so pressing Enter there opens the menu without also opening
@@ -533,6 +541,8 @@
     (e.currentTarget as HTMLImageElement).style.display = 'none';
   }
 </script>
+
+<svelte:window onkeydown={onWindowKey} />
 
 <div
   class="timeline"

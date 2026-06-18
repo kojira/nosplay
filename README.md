@@ -79,7 +79,8 @@ This project was built to fulfill the [requirements document (要件書)](https:
   being clipped.
   **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
   that shows the image **at up to its native size, downscaled only as much as
-  needed to fit the viewport** — a much larger view without leaving the page.
+  needed to fit the viewport** — a much larger view without leaving the page;
+  press **Esc** (or click the **✕** button or the backdrop) to close it.
   Clicking the rest of the card still opens the note on njump.me. When a note
   has **multiple** images the card shows the first with a **+N** badge; the
   lightbox shows them all (stacked, each whole and uncropped), and the full set
