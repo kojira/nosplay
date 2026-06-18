@@ -289,6 +289,16 @@ const DEEP_HISTORY_MAX_ROUNDS = 20;
  * oldest fetched note) and gives the left-edge anchoring something to bite on.
  */
 const TARGET_RANGE_ANCHOR_MS = DEFAULT_WINDOW_MS; // one extra window of backfill
+/**
+ * After a deep jump, playback walks the playhead from the fetched target slice
+ * toward now. FORWARD_PREFETCH_CHUNK_MS is the width of each forward backfill
+ * query (the gap between the target slice and the live edge is filled one such
+ * chunk at a time); FORWARD_PREFETCH_LEAD_MS is how far ahead of the covered
+ * edge the playhead may get before the next chunk is fetched, so a chunk is
+ * loaded before the window can empty into "Waiting for notes...".
+ */
+const FORWARD_PREFETCH_CHUNK_MS = DEFAULT_WINDOW_MS; // one window per backfill
+const FORWARD_PREFETCH_LEAD_MS = DEFAULT_WINDOW_MS; // prefetch this far ahead of the edge
 const LIVE_GLOBAL_LIMIT = 200;
 /** Max live notes buffered for TTS; older ones are dropped during a flood. */
 const TTS_QUEUE_MAX = 50;
@@ -485,6 +495,16 @@ export class TimelineStore {
   #voicesStop: (() => void) | null = null;
   /** Authors of the current feed (follow list, or fallback authors in limited mode). */
   #followAuthors: string[] = [];
+  /**
+   * Upper time bound (epoch ms) of the history covered AHEAD of the playhead
+   * after a deep jump. Infinity means coverage reaches the live edge (the live
+   * subscription takes over) and no forward prefetch is needed; it is made
+   * finite only by a deep jump (see ensureHistoryFor) so #prefetchForward can
+   * walk it toward now as playback advances.
+   */
+  #coverageEndMs = Number.POSITIVE_INFINITY;
+  /** Guards against overlapping forward-prefetch queries (only one in flight). */
+  #prefetching = false;
   /** Remembered intent to auto-login on next connect (persisted). */
   #rememberLogin = false;
   /** Pubkeys of arrived notes whose profile (kind:0) is not yet loaded. */
@@ -903,10 +923,16 @@ export class TimelineStore {
     if (this.playheadMs >= now) {
       this.isLive = true;
       this.isPlaying = true;
+      // Landed at the live edge: no forward gap to backfill.
+      this.#coverageEndMs = Number.POSITIVE_INFINITY;
     } else {
       // A shared/restored window can be sparse or empty; settle on the nearest
       // real notes instead of freezing on a blank span.
       this.#anchorPlayheadToVisibleNote();
+      // ensureHistoryFor (called above for a deep target) already anchored the
+      // forward coverage edge; warm the next chunk so resuming playback from a
+      // restored/shared deep position doesn't briefly empty the window.
+      void this.#prefetchForward();
     }
   }
 
@@ -1219,10 +1245,16 @@ export class TimelineStore {
       if (next >= now) {
         this.playheadMs = now;
         this.isLive = true;
+        // Back at the live edge: the live subscription covers things now.
+        this.#coverageEndMs = Number.POSITIVE_INFINITY;
       } else {
         this.playheadMs = next;
         // Advancing through the past: speak the note that just became current.
         this.#speakPlayheadHead();
+        // Backfill the forward gap before the playhead reaches the covered edge.
+        // (No-op unless a deep jump left a finite #coverageEndMs; never awaited
+        // so it can't block the frame.)
+        void this.#prefetchForward();
       }
     }
   }
@@ -1272,6 +1304,8 @@ export class TimelineStore {
     this.isLive = true;
     this.isPlaying = true;
     this.playheadMs = Date.now();
+    // Live again: clear any forward-prefetch state from a prior deep jump.
+    this.#coverageEndMs = Number.POSITIVE_INFINITY;
   }
 
   /** Jump the playhead to an absolute epoch-ms; turns LIVE off and clamps. */
@@ -1314,6 +1348,12 @@ export class TimelineStore {
     const authors = this.mode === 'follows' ? this.#followAuthors : FALLBACK_AUTHORS;
     if (authors.length === 0) return; // nothing to query against
     const relays = this.activeReadRelays;
+
+    // The jump fetches the bounded slice ending at the target; anchor the
+    // forward coverage edge there so #prefetchForward fills the gap toward now
+    // chunk-by-chunk as playback advances, instead of the window emptying once
+    // the slice is consumed.
+    this.#coverageEndMs = Math.min(targetMs, Date.now());
 
     this.historyLoading = true;
     try {
@@ -1405,6 +1445,62 @@ export class TimelineStore {
   }
 
   /**
+   * Backfill the historical gap *ahead* of the playhead after a deep jump.
+   * The jump only fetched a bounded slice ending at the target; as playback
+   * walks the playhead toward now, this loads the next chunk just before the
+   * playhead reaches the forward coverage edge, so the window never empties
+   * into "Waiting for notes...". A single number (#coverageEndMs) tracks how
+   * far toward now we've covered; Infinity means we've reached the live edge
+   * (the live subscription takes over) and nothing more is needed.
+   */
+  async #prefetchForward(): Promise<void> {
+    if (this.#prefetching) return;
+    if (this.isLive) return;
+    const now = Date.now();
+    if (!(this.#coverageEndMs < now)) return; // Infinity or already at the live edge
+    // Only reach forward once the playhead is approaching the covered edge.
+    if (this.playheadMs < this.#coverageEndMs - FORWARD_PREFETCH_LEAD_MS) return;
+
+    const authors = this.mode === 'follows' ? this.#followAuthors : FALLBACK_AUTHORS;
+    if (authors.length === 0) return;
+    const relays = this.activeReadRelays;
+
+    // A forward *leap* (e.g. a seek past the covered edge) would otherwise crawl
+    // chunk-by-chunk across an empty stretch the user skipped. Re-anchor the edge
+    // to one window behind the playhead so we fetch the window it actually needs.
+    if (this.playheadMs - this.#coverageEndMs > FORWARD_PREFETCH_CHUNK_MS) {
+      this.#coverageEndMs = this.playheadMs - this.windowMs;
+    }
+
+    const sinceMs = this.#coverageEndMs;
+    const untilMs = Math.min(this.#coverageEndMs + FORWARD_PREFETCH_CHUNK_MS, now);
+    this.#prefetching = true;
+    try {
+      let events: Event[];
+      try {
+        events = await pool.querySync(relays, {
+          kinds: [1],
+          authors,
+          since: Math.max(0, Math.floor(sinceMs / 1000)),
+          until: Math.floor(untilMs / 1000),
+          limit: HISTORY_LIMIT,
+        });
+      } catch {
+        return; // relay error: leave the edge put and retry on the next step
+      }
+      for (const e of events) this.addNote(e);
+      // Advance past the chunk we just queried so it isn't re-fetched. An empty or
+      // sparse chunk still advances — that's what keeps a quiet stretch from
+      // looping on the same window.
+      this.#coverageEndMs = untilMs;
+      // Reached the live edge: hand off to the live subscription (since = now-60).
+      if (untilMs >= now) this.#coverageEndMs = Number.POSITIVE_INFINITY;
+    } finally {
+      this.#prefetching = false;
+    }
+  }
+
+  /**
    * After a deep jump / shared-range restore settles the playhead, the loaded
    * notes nearest the target can all fall *before* the visible window's left
    * edge, leaving `[playhead - windowMs, playhead]` empty. This happens when the
@@ -1467,10 +1563,15 @@ export class TimelineStore {
     if (this.playheadMs >= now) {
       this.isLive = true;
       this.isPlaying = true;
+      // Landed at the live edge: no forward gap to backfill.
+      this.#coverageEndMs = Number.POSITIVE_INFINITY;
     } else {
       // The requested window may be sparse/empty; settle on real notes so the
       // jump lands on something visible rather than a frozen blank window.
       this.#anchorPlayheadToVisibleNote();
+      // Warm the next forward chunk now (even while paused) so resuming playback
+      // doesn't briefly empty the window before the first #step prefetch lands.
+      void this.#prefetchForward();
     }
     this.#scheduleSave();
   }

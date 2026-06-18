@@ -59,7 +59,11 @@ This project was built to fulfill the [requirements document (要件書)](https:
   sparse for these authors, nosplay fetches the nearest older notes and then
   settles the playhead onto the closest note at/behind the target — so the jump
   lands on visible notes (the nearest one sits at the window's right edge)
-  instead of freezing on a blank window. The button shows
+  instead of freezing on a blank window. As you then play forward from a deep
+  jump, nosplay keeps backfilling the history just ahead of the playhead one
+  window-sized chunk at a time, so consuming the initial slice no longer leaves
+  the window empty (**Waiting for notes…**) — playback stays filled all the way
+  to the live edge, where the live subscription takes over. The button shows
   **Loading…** while it fetches. Editing the field never moves the playhead on its
   own — the seek happens only on confirm — and jumping to a past moment pauses
   playback there rather than auto-playing on. (The seek slider and ±1m nudge still
@@ -187,7 +191,9 @@ at `end`. Opening a link:
   direct target-range query as a **Jump**) before settling the playhead there;
   and if that shared range is empty or sparse, the playhead is nudged onto the
   nearest note at/behind it so the restored view shows real notes rather than a
-  blank window.
+  blank window. Pressing play from a deep shared moment backfills the history
+  ahead of the playhead chunk-by-chunk, just like a deep Jump, so playback runs
+  smoothly up to the live edge without the window ever emptying.
 
 When neither param is present the app behaves exactly as before (restoring your
 persisted playback / starting live). `start` alone is treated as a bare jump
