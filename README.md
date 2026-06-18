@@ -43,10 +43,13 @@ This project was built to fulfill the [requirements document (要件書)](https:
   image links in the post text. Only `http(s)` URLs are ever used as an
   `<img src>`. The card thumbnail shows the **whole** image (letterboxed if
   needed) rather than a top-cropped slice, so you can tell at a glance what the
-  picture is. The thumbnail box has a preferred height but **shrinks before the
-  card clips it**, so even on short lanes the bottom of the image is never cut
-  off; its rendered width still tracks the image so the lane layout (which
-  reserves a little extra horizontal room for image cards) is unchanged.
+  picture is. The thumbnail is sized to be **comfortably readable** (it scales
+  with the viewport height and fills the available lane), and on image cards the
+  caption is clamped a little tighter to hand that room to the picture. The
+  thumbnail box has a preferred height but **shrinks before the card clips it**,
+  so even on short lanes the bottom of the image is never cut off; its rendered
+  width still tracks the image so the lane layout (which reserves a little extra
+  horizontal room for image cards) is unchanged.
   **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
   that shows the image **at up to its native size, downscaled only as much as
   needed to fit the viewport** — a much larger view without leaving the page.

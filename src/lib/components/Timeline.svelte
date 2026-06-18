@@ -393,6 +393,7 @@
       class:head={p.isHead}
       class:speaking={p.isSpeaking}
       class:muted={p.isMuted}
+      class:has-image={p.images.length > 0}
       style="left: {(1 - p.f) * 100}%; top: {(p.lane / LANES) * 100}%;"
       role="button"
       tabindex="0"
@@ -696,13 +697,27 @@
     flex: 0 0 auto;
   }
 
+  /* On image cards the thumbnail is the point, so spend the limited lane height
+     on it: clamp the caption to 2 lines (vs 3) to hand the freed row to the
+     bigger `.note-image` without touching the lane `max-height` cap. */
+  .note.has-image .content {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
   /* Inline image preview: a tap-to-enlarge thumbnail kept well within the card.
      It is the ONE flex child allowed to shrink (head-row and content are
-     `flex: 0 0 auto`). The thumbnail box has a preferred `height` of 72px, but
-     `flex: 0 1 auto; min-height: 0` lets it give up height when head + content
-     + image would otherwise exceed the card's lane cap — so the thumbnail box
-     shrinks instead of the card clipping the image's bottom edge (which read as
-     a "top-crop"). The img fills the box (`height: 100%`) with
+     `flex: 0 0 auto`). The thumbnail box has a *preferred* height of
+     `clamp(110px, 16vh, 200px)` — big enough to actually read on desktop, while
+     the `16vh` term and the 110px floor keep it sensible on short/mobile
+     viewports. The real ceiling, though, is the card's own
+     `max-height: calc((100% / 6) - 8px)` lane cap (each of the 6 timeline lanes
+     gets 1/6 of the height): `flex: 0 1 auto; min-height: 0` lets this box give
+     up height when head + content + image would exceed that cap, so the
+     thumbnail shrinks to fit instead of the card clipping the image's bottom
+     edge (which read as a "top-crop"). On tall desktop screens the lane is big
+     enough that the preferred height wins and the thumbnail is large; on short
+     screens it gracefully shrinks. The img fills the box (`height: 100%`) with
      `object-fit: contain`, so the *whole* picture is always visible
      (letterboxed) at whatever height the box ends up — never cropped. `width`
      still tracks the image's intrinsic width (capped by the card's max-width),
@@ -712,7 +727,7 @@
     position: relative;
     display: block;
     width: 100%;
-    height: 72px;
+    height: clamp(110px, 16vh, 200px);
     flex: 0 1 auto;
     min-height: 0;
     margin-top: 2px;
