@@ -19,13 +19,21 @@ This project was built to fulfill the [requirements document (要件書)](https:
   Legacy NIP-08 positional mentions (a `#[i]` token pointing at an `e`/`p` tag)
   are rewritten to a compact `[mention: note1…]` / `[mention: npub1…]` label —
   both in the card and the full-text modal — instead of showing a raw `#[0]`.
-  Each note keeps a stable vertical lane for its lifetime (assigned once, keyed
-  to its identity/author), so notes scroll horizontally without bouncing up and
-  down as the visible window slides. A card's **left edge is its exact time
-  anchor**, marked with a thin accent rail, so even though cards have different
-  widths (short vs. long text, with/without an image) the timeline always reads
-  right → newer, left → older. Notes posted in the same second are ordered
-  deterministically by event id, so the horizontal layout is stable run-to-run.
+  Vertical placement is computed by a **deterministic 2D layout engine** that
+  packs each card into the first free vertical slot from the measured rectangles
+  of the cards already on screen, so **no two cards ever overlap and none spills
+  past the top or bottom edge** — text and image cards alike. Each note keeps the
+  vertical position it is first assigned for its lifetime, so notes scroll
+  horizontally without bouncing up and down as the visible window slides. A
+  card's **left edge is its exact time anchor**, marked with a thin accent rail,
+  so even though cards have different widths/heights (short vs. long text,
+  with/without an image) the timeline always reads right → newer, left → older.
+  Notes posted in the same second are ordered deterministically by event id, so
+  the layout is stable run-to-run. When a moment gets too crowded to fit every
+  card without overlapping, **nearby notes from the same author are folded into a
+  single "author stack"** — the front note renders as a normal, fully interactive
+  card (offset cards peek out behind it with a **×N** count badge) so the timeline
+  stays non-overlapping while **never dropping a note**.
 - **Open on njump** — **clicking (or pressing Enter/Space on) a note opens that
   specific event on [njump.me](https://njump.me) in a new tab** (`https://njump.me/<note1…>`,
   with the `note1` id encoded via NIP-19). The per-note options that the click
@@ -49,17 +57,17 @@ This project was built to fulfill the [requirements document (要件書)](https:
   *nothing but* image links collapses to a compact **"Image post"** label rather
   than rendering blank — the full, unmodified text (URLs included) is still in
   the **⋯ → Show full post text** modal. Because an image card is image-first it
-  is **taller than a plain text card — it spans two lanes** instead of one, and
-  the lane placement **reserves that full two-lane footprint**: other cards are
-  never laid over the picture, and an image card is never started low enough to
-  spill past the bottom edge, so image cards neither overlap their neighbours nor
-  overflow the screen. The thumbnail **fills that reserved two-lane footprint** —
-  the card occupies exactly the height it reserves rather than floating short
-  inside a taller slot — and it **scales down with the viewport** so on short
-  screens the whole image still fits (letterboxed, never cropped) instead of
-  clipping. Image cards also get a slightly **wider horizontal estimate and an
-  extra lane cushion** than text cards, so the heavier two-lane picture keeps
-  clear air around its neighbours instead of packing tight against them.
+  is **taller than a plain text card**, and the layout engine **measures and
+  reserves its real (taller) footprint**: other cards are never laid over the
+  picture, and a card is never placed low enough to spill past the bottom edge,
+  so image cards neither overlap their neighbours nor overflow the screen. In
+  extreme bursts, if a card still cannot be placed on its own without violating
+  those rules, the timeline **falls back only then** to a compact **same-author
+  stack**: one front card stays fully interactive, thin cards are shown behind
+  it, and a count badge indicates how many nearby notes from that author were
+  folded into the stack. The thumbnail is sized to a readable, viewport-aware
+  height and the whole image always fits (letterboxed, never cropped) instead of
+  being clipped.
   **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
   that shows the image **at up to its native size, downscaled only as much as
   needed to fit the viewport** — a much larger view without leaving the page.

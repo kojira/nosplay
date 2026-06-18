@@ -4,52 +4,35 @@
   import { getNoteImageUrls } from '../nostr/images';
   import { formatNoteContent } from '../nostr/mentions';
   import { njumpUrl } from '../nostr/njump';
+  import { packTimeline, GAP, type LayoutInput, type PlacedItem } from '../timeline/layout';
   import type { ProfileMeta } from '../nostr/profiles';
   import type { Note } from '../nostr/types';
 
-  const LANES = 6; // vertical lanes for the comment stack
-  // Each note is left-anchored at its time and grows rightward toward the newer
-  // side, rendered as a box whose width depends on its content (mirrors the
-  // .note CSS: width:max-content; max-width:min(340px, 60vw)). Two notes on the
-  // same lane visually overlap when the older (further-left) box extends right
-  // far enough to reach the newer note's anchor, so we keep a lane "busy" for
-  // exactly the time span *that note's own box* occupies forward in time from
-  // its anchor at the current zoom (estNotePx → busyMs).
-  // Earlier this reserved the single MAX width for every note, which both
-  // over-reserved short notes (wasting lane time) and still let wide notes
-  // collide; the per-note, content-aware estimate below replaces that.
+  // Card sizes used to be approximated with a 1D busy-interval reservation over
+  // 6 fixed lanes; that could not represent real 2D rectangle collisions, so
+  // cards overlapped/overflowed once the estimate drifted from the measured box
+  // (PLAN.md §1.2). Vertical placement now lives in the pure, deterministic 2D
+  // packer (src/lib/timeline/layout.ts), fed by per-note MEASURED sizes (with a
+  // deterministic estimate only as the pre-measurement seed). The constants
+  // below are now used solely to ESTIMATE a card's initial width/height before
+  // the real getBoundingClientRect() measurement overrides them.
   const MAX_NOTE_PX = 340; // .note max-width cap (px)
   const MIN_NOTE_PX = 120; // floor so tiny notes still reserve breathing room
   const IMG_NOTE_PX = 240; // floor for image-bearing notes — wider than text so
-  // the 2-lane-tall image reads as a photo (landscape-ish) rather than a narrow
-  // column, and so its horizontal estimate is distinct from a text card's.
+  // the image reads as a photo (landscape-ish) rather than a narrow column, and
+  // so its horizontal estimate is distinct from a text card's.
   const NOTE_VW_FRACTION = 0.6; // .note max-width: ...60vw
   const PAD_X = 10; // .note horizontal padding (px), both sides
   const AVATAR_PX = 18; // .avatar width
   const HEAD_GAP_PX = 6; // .head-row gap (avatar → author)
   const CONTENT_FONT = 14; // .note .content font-size
   const AUTHOR_FONT = 12; // .note .author font-size
-  const GAP_PX = 8; // base horizontal gap reserved between adjacent notes
-  const LANE_BUFFER_PX = 12; // extra cushion so same-lane neighbours never kiss
-  // Image cards are 2 lanes tall and visually heavy; reserve a little extra
-  // lane-time around them (on top of the shared cushion) so neighbours don't
-  // pack edge-to-edge against the picture. This is the per-image "wider lane
-  // occupancy rule" beyond the bare 2-lane vertical span.
-  const IMG_BUFFER_PX = 20;
-  // Vertical footprint, in lanes, that a card occupies for collision avoidance.
-  // A plain text card is capped to a single lane by CSS (.note max-height:
-  // calc((100%/6) - 8px)). An image card is image-first and intentionally taller
-  // — it occupies IMG_LANE_SPAN consecutive lanes. The placement reserves that
-  // many lanes (so other cards never overlap the image region) AND never starts
-  // an image card lower than LANES - IMG_LANE_SPAN (so it can't overflow the
-  // bottom edge). The CSS .note.has-image max-height MUST match this span
-  // (currently 2 lanes); changing one without the other reintroduces overlap.
-  const TEXT_LANE_SPAN = 1;
-  const IMG_LANE_SPAN = 2;
-  // Fallback fraction used before the container width is measured. Leans
-  // conservative (wide) so the un-measured first frame never packs notes too
-  // tightly; once containerW is known the per-note estimate takes over.
-  const FALLBACK_BUSY_FRACTION = 0.2;
+  // Vertical estimate helpers (px), used ONLY to seed the packer before a card
+  // is measured. The measurement (and image onload) overrides these (C7).
+  const HEAD_ROW_PX = 22; // avatar/author head row height
+  const CONTENT_LINE_PX = 20; // ~one clamped content line at 14px / 1.4
+  const NOTE_V_PAD = 12; // .note vertical padding (top+bottom)
+  const IMG_EST_PX = 220; // estimated thumbnail height for an image card seed
 
   /**
    * True for code points that render at roughly one full em (CJK ideographs,
@@ -145,8 +128,10 @@
     return stripped || 'Image post';
   }
 
-  /** Measured timeline width (px); drives the busy-interval calculation. */
+  /** Measured timeline width (px); maps a note's time to its left edge. */
   let containerW = $state(0);
+  /** Measured timeline height (px) = H, the packer's vertical bound (C2). */
+  let containerH = $state(0);
 
   /** The AI-background layer element, bound when the feature renders an SVG. */
   let aiBgEl = $state<HTMLDivElement | null>(null);
@@ -197,10 +182,10 @@
 
   interface Placed {
     note: Note;
-    /** 0 = right edge (playhead), 1 = left edge (window start). The card's
-     *  LEFT edge is placed at (1 - f). */
-    f: number;
-    lane: number;
+    /** Chosen top in px (from the 2D packer; stable for the note's lifetime). */
+    y: number;
+    /** Card height in px (measured-or-estimated; drives the inline height). */
+    height: number;
     isHead: boolean;
     isSpeaking: boolean;
     isMuted: boolean;
@@ -211,144 +196,189 @@
      *  back to a neutral "Image post" label when nothing else remains). Used
      *  for the card text and width estimate; note.content stays raw. */
     display: string;
+    /** When this card is an author-stack FRONT, the notes stacked behind it
+     *  (deterministic (created_at, id) order); empty for a plain card. */
+    stacked: Note[];
+    /** Total cards represented by this footprint (behind count + 1). 1 = plain. */
+    count: number;
   }
 
-  // Identity-keyed lane cache. A note keeps the lane it was first assigned for
-  // its whole lifetime, so as the visible window slides the note's vertical
-  // row never changes — it scrolls horizontally without bouncing up/down. This
-  // replaces the previous purely greedy, window-local reassignment (which
-  // recomputed every lane each frame and so jittered as earlier notes left the
-  // window). Cleared when the feed is rebuilt (see feedVersion below).
-  const laneByNote = new Map<string, number>();
-  // Per-author preferred lane: when a brand-new note needs a row, we try to put
-  // it on the same lane its author last used (if free), keeping an author's
-  // notes on a consistent line. Also reset on feed rebuild.
-  const laneByAuthor = new Map<string, number>();
-  let laneFeedVersion = -1;
+  // --- Measurement cache (C7: estimate → measure → re-pack on y only) ---------
+  // Per-note MEASURED {w,h} in px, recorded after render via getBoundingClientRect
+  // (text cards) and image onload (image cards settle taller). Keyed by note id.
+  // The packer reads these so vertical placement is driven by real rectangles,
+  // not a text heuristic. Reset on feed rebuild (feedVersion) below.
+  let measured = $state<Map<string, { w: number; h: number }>>(new Map());
+  // Bound front-card elements, keyed by note id, used to read their real box.
+  const cardEls = new Map<string, HTMLElement>();
+  // Identity-keyed y cache owned by the packer (C4: a note keeps its y for life).
+  // Cleared together with the measurement cache on feed rebuild.
+  const yCache = new Map<string, number>();
+  let layoutFeedVersion = -1;
+
+  // Effective CSS max note width for the current container (min(340px, 60vw)).
+  // Before the container is measured fall back to the px cap.
+  const maxNotePx = $derived(containerW > 0 ? Math.min(MAX_NOTE_PX, containerW * NOTE_VW_FRACTION) : MAX_NOTE_PX);
+
+  // Per-note derived metadata (images + display text), computed once and reused
+  // by both the size estimate and the rendered card (the template never
+  // re-scans the note). Keyed in render order.
+  const noteMeta = $derived.by(() => {
+    const m = new Map<string, { images: string[]; display: string }>();
+    for (const note of timeline.visibleNotes) {
+      const images = getNoteImageUrls(note);
+      const display = cardText(formatNoteContent(note.content, note.tags), images);
+      m.set(note.id, { images, display });
+    }
+    return m;
+  });
 
   /**
-   * Pick a starting lane for a note not yet in the cache, reserving `span`
-   * consecutive lanes (1 for text, IMG_LANE_SPAN for an image card). The card
-   * occupies lanes [start .. start+span-1], so:
-   *   - `start` is constrained to 0 .. LANES-span, which guarantees the card's
-   *     bottom never falls past the last lane (no bottom overflow);
-   *   - a block is "free" only when ALL its lanes are free at `ms`, so a taller
-   *     image card can't be slotted on top of a neighbour it would overlap.
-   * Deterministic: prefer the author's previous lane when its block is free,
-   * else the lowest fully-free block, else the block that frees soonest (least
-   * overlap). Never reassigns an existing note, so it cannot cause vertical
-   * bounce. For span === 1 this reduces to the previous lowest-free behaviour.
+   * Estimated card height (px) before real measurement — head row + clamped
+   * content lines for text; a taller estimate (caption line + thumbnail) for an
+   * image card. Deterministic; only a C7 seed, overridden by measurement.
    */
-  function chooseLane(
-    laneFreeAt: number[],
-    ms: number,
-    preferred: number | undefined,
-    span: number,
-  ): number {
-    const maxStart = LANES - span;
-    // Latest free-time across a span-wide block starting at `s` (the block is
-    // free for a new note only once its busiest lane has freed).
-    const blockFreeAt = (s: number): number => {
-      let f = -Infinity;
-      for (let i = s; i < s + span; i++) if (laneFreeAt[i] > f) f = laneFreeAt[i];
-      return f;
-    };
-    if (preferred !== undefined && preferred <= maxStart && blockFreeAt(preferred) <= ms) {
-      return preferred;
-    }
-    let lane = 0;
-    let best = Infinity;
-    for (let s = 0; s <= maxStart; s++) {
-      const f = blockFreeAt(s);
-      if (f <= ms) return s; // lowest fully-free block
-      if (f < best) {
-        best = f;
-        lane = s;
-      }
-    }
-    return lane;
+  function estHeightPx(display: string, hasImage: boolean): number {
+    if (hasImage) return HEAD_ROW_PX + CONTENT_LINE_PX + IMG_EST_PX + NOTE_V_PAD;
+    // Plain text wraps and clamps to 3 lines: 1..3 lines from a width-aware guess.
+    const innerMax = Math.max(MIN_NOTE_PX - PAD_X * 2, maxNotePx - PAD_X * 2);
+    const lineW = estTextPx(display, CONTENT_FONT);
+    const lines = Math.max(1, Math.min(3, Math.ceil(lineW / Math.max(1, innerMax))));
+    return HEAD_ROW_PX + lines * CONTENT_LINE_PX + NOTE_V_PAD;
   }
 
-  // Place the time-ordered visible notes into stable lanes. visibleNotes is
-  // ascending by created_at and never includes notes newer than the playhead,
-  // so f is always >= 0 (nothing renders to the right of the playhead line).
-  const placed = $derived.by<Placed[]>(() => {
-    const notes = timeline.visibleNotes;
+  // Build the packer input from the time-ordered visible notes. visibleNotes is
+  // ascending by (created_at, id) and never newer than the playhead, so x0 (the
+  // left edge from time) is always within [0, W]. Width/height come from the
+  // measurement cache when present, otherwise from the deterministic estimate.
+  // Keyed (re-derives) on visibleNotes, measurements, container size, and
+  // playhead/window so x0 tracks time — but the packer only ever moves y, and a
+  // note's y is frozen via yCache, so horizontal motion never shifts rows.
+  const layoutInputs = $derived.by<LayoutInput[]>(() => {
     const playhead = timeline.playheadMs;
     const win = timeline.windowMs;
-
-    // Drop cached lanes when the feed was torn down and rebuilt.
-    if (timeline.feedVersion !== laneFeedVersion) {
-      laneByNote.clear();
-      laneByAuthor.clear();
-      laneFeedVersion = timeline.feedVersion;
+    const W = containerW;
+    const meta = noteMeta;
+    const ms2 = measured; // track the measurement map as a dependency
+    const out: LayoutInput[] = [];
+    for (const note of timeline.visibleNotes) {
+      const ms = note.created_at * 1000;
+      const f = (playhead - ms) / win; // 0..1 from right edge
+      const x0 = (1 - f) * W; // left edge in px (C5: time-only)
+      const nm = meta.get(note.id);
+      const hasImage = (nm?.images.length ?? 0) > 0;
+      const display = nm?.display ?? '';
+      const real = ms2.get(note.id);
+      const width = real?.w ?? estNotePx(name(note), display, maxNotePx, hasImage);
+      const height = real?.h ?? estHeightPx(display, hasImage);
+      out.push({ id: note.id, author: note.pubkey, x0, width, height });
     }
+    return out;
+  });
 
-    // Effective CSS max note width for the current container (min(340px, 60vw)).
-    // Before the container is measured (containerW === 0) fall back to the px cap.
-    const maxNotePx = containerW > 0 ? Math.min(MAX_NOTE_PX, containerW * NOTE_VW_FRACTION) : MAX_NOTE_PX;
-    const measured = containerW > 0;
+  // Run the pure 2D packer. Re-packs whenever layoutInputs changes (visible set,
+  // measurements, container size, time). yCache freezes each note's y for its
+  // lifetime (C4); the packer only ever assigns/keeps y, never x (C5).
+  const packed = $derived.by<PlacedItem[]>(() => {
+    // Drop the y-cache and measurements when the feed was torn down and rebuilt.
+    if (timeline.feedVersion !== layoutFeedVersion) {
+      yCache.clear();
+      cardEls.clear();
+      measured = new Map();
+      layoutFeedVersion = timeline.feedVersion;
+    }
+    const H = containerH > 0 ? containerH : 600; // sane fallback pre-measure
+    return packTimeline(layoutInputs, H, yCache);
+  });
+
+  // Final render list: join the packer's footprint-owning items back to their
+  // notes and stack members, and attach head/speaking/muted/display state.
+  const placed = $derived.by<Placed[]>(() => {
+    const byId = new Map<string, Note>();
+    for (const note of timeline.visibleNotes) byId.set(note.id, note);
     const headId = timeline.headNote?.id ?? null;
     const speakingId = timeline.speakingId;
     const muted = timeline.mutedPubkeys;
-    const laneFreeAt = new Array<number>(LANES).fill(-Infinity);
+    const meta = noteMeta;
     const out: Placed[] = [];
-    for (const note of notes) {
-      const ms = note.created_at * 1000;
-      const f = (playhead - ms) / win; // 0..1 from right edge
-      // Resolve image URLs once here, then reuse for both the lane-width
-      // estimate and rendering (the template never re-scans the note).
-      const images = getNoteImageUrls(note);
-      // Rewrite legacy `#[i]` mentions, then (for image notes) strip the raw
-      // image-URL strings so the thumbnail leads instead of the link text.
-      // Computed once and reused for both the width estimate and the rendered
-      // card text (keeps the two in sync); the modal re-derives from raw content.
-      const display = cardText(formatNoteContent(note.content, note.tags), images);
-      // Vertical footprint in lanes: an image card is taller (image-first) and
-      // occupies IMG_LANE_SPAN consecutive lanes; a text card occupies one. The
-      // span drives both how many lanes we reserve (so neighbours don't overlap
-      // the taller image region) and how low the card may start (so it can't
-      // overflow the bottom edge) — see chooseLane.
-      const span = images.length > 0 ? IMG_LANE_SPAN : TEXT_LANE_SPAN;
-      // Reuse the note's existing lane when known; only assign one the first
-      // time we see it. New notes fit around the lanes already occupied this
-      // pass, so overlaps stay reasonable while existing rows stay put.
-      let lane = laneByNote.get(note.id);
-      if (lane === undefined) {
-        lane = chooseLane(laneFreeAt, ms, laneByAuthor.get(note.pubkey), span);
-        laneByNote.set(note.id, lane);
-      }
-      laneByAuthor.set(note.pubkey, lane);
-      // Reserve this lane for exactly the time span this note's own box covers.
-      // The box extends forward (rightward) in time from the note's left-edge
-      // anchor, so reserving up to `ms + busyMs` is exactly right.
-      // Content-aware (vs. the old single MAX width for every note): short notes
-      // free their lane sooner, wide notes hold it longer so they can't collide.
-      // Image cards get an extra horizontal cushion (IMG_BUFFER_PX) so the
-      // 2-lane-tall picture keeps clear air around its neighbours instead of
-      // packing tight against them.
-      const cushion = GAP_PX + LANE_BUFFER_PX + (images.length > 0 ? IMG_BUFFER_PX : 0);
-      const busyMs = measured
-        ? win * Math.min((estNotePx(name(note), display, maxNotePx, images.length > 0) + cushion) / containerW, 1)
-        : win * FALLBACK_BUSY_FRACTION;
-      // Reserve every lane this card spans vertically, so a taller image card
-      // holds its whole footprint busy for that time and nothing is placed over
-      // it. `lane + span <= LANES` is guaranteed by chooseLane.
-      const freeAt = ms + busyMs;
-      for (let i = lane; i < lane + span; i++) laneFreeAt[i] = freeAt;
+    for (const item of packed) {
+      const note = byId.get(item.id);
+      if (!note) continue;
+      const nm = meta.get(note.id);
+      const stacked = (item.stackedIds ?? [])
+        .map((id) => byId.get(id))
+        .filter((n): n is Note => n !== undefined);
       out.push({
         note,
-        f,
-        lane,
+        y: item.y,
+        height: item.height,
         isHead: note.id === headId,
         isSpeaking: note.id === speakingId,
         isMuted: muted.has(note.pubkey),
-        images,
-        display,
+        images: nm?.images ?? [],
+        display: nm?.display ?? '',
+        stacked,
+        count: item.count ?? 1,
       });
     }
     return out;
   });
+
+  // Per-frame horizontal position: a note's LEFT edge sits at (1 - f) * 100%.
+  // Recomputed cheaply every frame from the playhead (vertical y stays frozen).
+  function leftPct(note: Note): number {
+    const ms = note.created_at * 1000;
+    const f = (timeline.playheadMs - ms) / timeline.windowMs;
+    return (1 - f) * 100;
+  }
+
+  // Register/unregister a card element for measurement. The action re-measures
+  // after the node mounts; the $effect below re-measures the whole visible set
+  // whenever it (or its content) changes.
+  function measure(el: HTMLElement, id: string): { destroy: () => void } {
+    cardEls.set(id, el);
+    return {
+      destroy() {
+        cardEls.delete(id);
+      },
+    };
+  }
+
+  /**
+   * Record a card's real rendered size into the measurement cache, then trigger
+   * a deterministic re-pack (C7). Only writes when the size actually changed (to
+   * a 1px tolerance) so this never loops: a stable measurement is idempotent.
+   */
+  function recordSize(id: string, w: number, h: number): void {
+    const prev = measured.get(id);
+    if (prev && Math.abs(prev.w - w) < 1 && Math.abs(prev.h - h) < 1) return;
+    const next = new Map(measured);
+    next.set(id, { w, h });
+    measured = next; // new ref → layoutInputs re-derives → packer re-runs (y only)
+  }
+
+  // Measure every visible card after it renders. Reading placed makes this rerun
+  // whenever the visible set / layout changes; reading measured.size lets a
+  // settled image (which grows the box on onload) be picked up on the next pass.
+  // We measure the card's content box ignoring the JS-driven inline height so
+  // the packer learns the card's NATURAL size, then sizes the footprint to it.
+  $effect(() => {
+    void placed; // dependency: re-measure when the rendered set changes
+    void measured.size;
+    for (const [id, el] of cardEls) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) recordSize(id, rect.width, rect.height);
+    }
+  });
+
+  // When a card image finishes loading it changes the card's natural height;
+  // re-measure that card so the packer re-flows around the real picture (C7).
+  function onImageLoad(id: string): void {
+    const el = cardEls.get(id);
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) recordSize(id, rect.width, rect.height);
+  }
 
   // ---- tap/click menu + full-text modal ----
   /** Note whose action menu is open, or null. */
@@ -459,6 +489,7 @@
   role="log"
   aria-label="Live timeline of notes"
   bind:clientWidth={containerW}
+  bind:clientHeight={containerH}
 >
   <!-- AI summary background: a large, faint SVG that Gemini Nano generated
        directly, behind the notes. Only present when the feature is on and a
@@ -484,74 +515,96 @@
   {/if}
 
   {#each placed as p (p.note.id)}
+    <!-- A card's LEFT edge is its time anchor (left = (1 - f), C5); its TOP comes
+         from the pure 2D packer (stable for the note's lifetime, C4). Vertical
+         size is JS/content-driven now (no fixed-lane CSS height), so the packer's
+         reserved footprint matches the rendered box and cards never overlap or
+         overflow the bottom edge (C1/C2). When a note is an author-stack front
+         it carries `stacked` notes shown as thin offset cards behind it + a count
+         badge; the front keeps the full interactive card (njump, ⋯, TTS,
+         lightbox, full-text). The behind cards never grow the footprint. -->
     <div
-      class="note"
-      class:head={p.isHead}
-      class:speaking={p.isSpeaking}
-      class:muted={p.isMuted}
-      class:has-image={p.images.length > 0}
-      style="left: {(1 - p.f) * 100}%; top: {(p.lane / LANES) * 100}%;"
-      role="button"
-      tabindex="0"
-      title="Open this note on njump.me (new tab) — use ⋯ for options"
-      onclick={() => openNote(p.note)}
-      onkeydown={(e) => onNoteKey(e, p.note)}
+      class="note-slot"
+      class:is-stack={p.count > 1}
+      style="left: {leftPct(p.note)}%; top: {p.y}px;"
     >
-      <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
-           that left edge so variable-width cards still read right→newer. -->
-      <span class="time-anchor" aria-hidden="true"></span>
-      <button
-        class="note-menu-btn"
-        type="button"
-        aria-label="Note options"
-        title="Options (full text, mute TTS)"
-        onclick={(e) => onMenuButton(e, p.note)}
-      >⋯</button>
-      <div class="head-row">
-        {#if p.isSpeaking}
-          <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
-        {/if}
-        {#if p.isMuted}
-          <span class="muted-badge" title="TTS muted for this author" aria-label="TTS muted">🔇</span>
-        {/if}
-        <span class="avatar" aria-hidden="true">
-          <span class="avatar-fallback">{initial(p.note)}</span>
-          {#if meta(p.note)?.picture}
-            <img
-              class="avatar-img"
-              src={meta(p.note)?.picture}
-              alt=""
-              loading="lazy"
-              referrerpolicy="no-referrer"
-              onerror={onAvatarError}
-            />
-          {/if}
-        </span>
-        <span class="author">{name(p.note)}</span>
-      </div>
-      <span class="content">{p.display}</span>
-      {#if p.images.length > 0}
-        <button
-          class="note-image"
-          type="button"
-          aria-label="Enlarge image"
-          title="Tap to enlarge"
-          onclick={(e) => openLightbox(e, p.note)}
-        >
-          <img
-            src={p.images[0]}
-            alt="Note attachment"
-            loading="lazy"
-            decoding="async"
-            referrerpolicy="no-referrer"
-            onerror={onNoteImageError}
-          />
-          <span class="image-zoom-hint" aria-hidden="true">⤢</span>
-          {#if p.images.length > 1}
-            <span class="image-count" aria-label={`${p.images.length} images`}>+{p.images.length - 1}</span>
-          {/if}
-        </button>
+      {#if p.count > 1}
+        <!-- Thin offset cards behind the front, hinting "more from this author"
+             without enlarging the footprint. Purely decorative. -->
+        <span class="stack-card stack-2" aria-hidden="true"></span>
+        <span class="stack-card stack-1" aria-hidden="true"></span>
+        <span class="stack-count" aria-label={`${p.count} notes from this author`}>×{p.count}</span>
       {/if}
+      <div
+        class="note"
+        class:head={p.isHead}
+        class:speaking={p.isSpeaking}
+        class:muted={p.isMuted}
+        class:has-image={p.images.length > 0}
+        use:measure={p.note.id}
+        role="button"
+        tabindex="0"
+        title="Open this note on njump.me (new tab) — use ⋯ for options"
+        onclick={() => openNote(p.note)}
+        onkeydown={(e) => onNoteKey(e, p.note)}
+      >
+        <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
+             that left edge so variable-width cards still read right→newer. -->
+        <span class="time-anchor" aria-hidden="true"></span>
+        <button
+          class="note-menu-btn"
+          type="button"
+          aria-label="Note options"
+          title="Options (full text, mute TTS)"
+          onclick={(e) => onMenuButton(e, p.note)}
+        >⋯</button>
+        <div class="head-row">
+          {#if p.isSpeaking}
+            <span class="speaking-badge" title="Reading aloud" aria-label="Reading aloud">🔊</span>
+          {/if}
+          {#if p.isMuted}
+            <span class="muted-badge" title="TTS muted for this author" aria-label="TTS muted">🔇</span>
+          {/if}
+          <span class="avatar" aria-hidden="true">
+            <span class="avatar-fallback">{initial(p.note)}</span>
+            {#if meta(p.note)?.picture}
+              <img
+                class="avatar-img"
+                src={meta(p.note)?.picture}
+                alt=""
+                loading="lazy"
+                referrerpolicy="no-referrer"
+                onerror={onAvatarError}
+              />
+            {/if}
+          </span>
+          <span class="author">{name(p.note)}</span>
+        </div>
+        <span class="content">{p.display}</span>
+        {#if p.images.length > 0}
+          <button
+            class="note-image"
+            type="button"
+            aria-label="Enlarge image"
+            title="Tap to enlarge"
+            onclick={(e) => openLightbox(e, p.note)}
+          >
+            <img
+              src={p.images[0]}
+              alt="Note attachment"
+              loading="lazy"
+              decoding="async"
+              referrerpolicy="no-referrer"
+              onload={() => onImageLoad(p.note.id)}
+              onerror={onNoteImageError}
+            />
+            <span class="image-zoom-hint" aria-hidden="true">⤢</span>
+            {#if p.images.length > 1}
+              <span class="image-count" aria-label={`${p.images.length} images`}>+{p.images.length - 1}</span>
+            {/if}
+          </button>
+        {/if}
+      </div>
     </div>
   {/each}
 
@@ -688,14 +741,27 @@
     font-size: 14px;
   }
 
-  .note {
+  /* Positioned wrapper: carries the card's time-anchored LEFT edge and the
+     packer's chosen TOP (px). The inner .note flows naturally inside it, so the
+     card's height is content-driven and matches the footprint the 2D packer
+     reserved for it — there is no fixed-lane CSS height coupling any more. */
+  .note-slot {
     position: absolute;
+    margin-left: 4px;
+  }
+  /* Contain the behind-stack cards' negative z-index within the slot so they
+     layer behind the front card but never sink below the timeline background. */
+  .note-slot.is-stack {
+    isolation: isolate;
+  }
+
+  .note {
+    position: relative;
     /* Left-anchored at the note's time position: the card's left edge is its
-       time anchor and content grows rightward toward the newer side. */
+       time anchor and content grows rightward toward the newer side. Vertical
+       size is content-driven (JS packer reserves exactly this height). */
     width: max-content;
     max-width: min(340px, 60vw);
-    max-height: calc((100% / 6) - 8px);
-    margin-left: 4px;
     display: flex;
     flex-direction: column;
     gap: 3px;
@@ -806,43 +872,21 @@
     margin-bottom: 1px;
   }
 
-  /* An image card is image-first and spans IMG_LANE_SPAN (2) lanes. This height
-     MUST stay in lockstep with that JS span (see IMG_LANE_SPAN in the script):
-     two lanes tall, minus the same 8px inter-lane gap a text card leaves. The
-     lane placement reserves both lanes (so neighbours never overlap the picture)
-     and never starts an image card below lane LANES-2, so this 2-lane height can
-     never intrude into a lower lane or overflow the bottom edge. The picture
-     still keeps a real, readable size while its footprint is fully accounted
-     for by collision avoidance. */
-  .note.has-image {
-    max-height: calc((100% / 6) * 2 - 8px);
-  }
-
-  /* Inline image preview: a tap-to-enlarge thumbnail kept well within the card.
-     It is the ONE flex child allowed to shrink (head-row and content are
-     `flex: 0 0 auto`). The thumbnail box has a *preferred* height of
-     `clamp(110px, 16vh, 200px)` — big enough to actually read on desktop, while
-     the `16vh` term and the 110px floor keep it sensible on short/mobile
-     viewports. The real ceiling, though, is the card's own
-     `max-height: calc((100% / 6) - 8px)` lane cap (each of the 6 timeline lanes
-     gets 1/6 of the height): `flex: 0 1 auto; min-height: 0` lets this box give
-     up height when head + content + image would exceed that cap, so the
-     thumbnail shrinks to fit instead of the card clipping the image's bottom
-     edge (which read as a "top-crop"). On tall desktop screens the lane is big
-     enough that the preferred height wins and the thumbnail is large; on short
-     screens it gracefully shrinks. The img fills the box (`height: 100%`) with
-     `object-fit: contain`, so the *whole* picture is always visible
-     (letterboxed) at whatever height the box ends up — never cropped. `width`
-     still tracks the image's intrinsic width (capped by the card's max-width),
-     so image cards keep the same rendered width the lane reservation assumes.
-     The faint backdrop makes the letterbox margin read as intentional. */
+  /* Inline image preview: a tap-to-enlarge thumbnail. Its height is a stable,
+     deterministic clamp (no longer tied to a fixed lane fraction): big enough to
+     read on desktop, sensible on short/mobile viewports. Because the card height
+     is now content-driven and the 2D packer reserves exactly the card's measured
+     box, this thumbnail height simply contributes to that measured height — no
+     manual lane-span coupling is needed, and re-measuring on image onload lets
+     the packer settle around the picture (C7). The img fills the box with
+     `object-fit: contain`, so the WHOLE picture is always visible (letterboxed),
+     never cropped; the faint backdrop makes the letterbox margin intentional. */
   .note-image {
     position: relative;
     display: block;
     width: 100%;
-    height: clamp(110px, 16vh, 200px);
-    flex: 0 1 auto;
-    min-height: 0;
+    height: clamp(140px, 22vh, 260px);
+    flex: 0 0 auto;
     margin-top: 2px;
     padding: 0;
     border: none;
@@ -856,28 +900,54 @@
     outline-offset: 1px;
   }
 
-  /* Image-first cards: make the thumbnail FILL the card's reserved 2-lane
-     footprint instead of sitting at a fixed preferred height that often left a
-     short card floating inside a tall 2-lane slot (an awkward empty band) on
-     desktop, while still being too tall on short viewports.
-
-     Trick: the preferred height (60vh) is deliberately larger than any 2-lane
-     card cap, so the inherited `flex: 0 1 auto; min-height: 0` shrink pulls the
-     box DOWN to exactly the space the card has left after head-row + caption —
-     i.e. the image always occupies the full height it reserves, on every
-     viewport, and scales down proportionally on short screens. The whole-image
-     `contain` behaviour (letterboxed, never cropped) is unchanged; only the box
-     height changes. The card's own 2-lane `max-height` remains the hard ceiling,
-     so the picture can never exceed its reserved footprint. */
-  .note.has-image .note-image {
-    height: 60vh;
-  }
-
   .note-image img {
     display: block;
     width: 100%;
     height: 100%;
     object-fit: contain;
+  }
+
+  /* ---- author stack (crowding fallback, PLAN.md §4.3.1) ----
+     When the packer cannot fit a same-author near note individually without
+     overlapping or overflowing, it folds it BEHIND a front card (the stack keeps
+     the front's single footprint). We render thin offset cards behind the front
+     to hint "more from this author", plus a ×N count badge. These behind cards
+     are purely decorative (the front keeps the full interactive card) and never
+     enlarge the footprint, so C2 stays satisfied automatically. */
+  .stack-card {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: 8px;
+    background: rgba(28, 31, 41, 0.7);
+    border: 1px solid var(--border);
+    pointer-events: none;
+  }
+  .stack-card.stack-1 {
+    transform: translate(4px, 4px);
+    z-index: -1;
+    opacity: 0.85;
+  }
+  .stack-card.stack-2 {
+    transform: translate(8px, 8px);
+    z-index: -2;
+    opacity: 0.6;
+  }
+  .stack-count {
+    position: absolute;
+    top: -8px;
+    left: -8px;
+    z-index: 3;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.5;
+    pointer-events: none;
   }
 
   /* A small "expand" affordance so it's obvious the thumbnail enlarges on tap
