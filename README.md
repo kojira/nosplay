@@ -48,17 +48,18 @@ This project was built to fulfill the [requirements document (要件書)](https:
   the remaining caption is clamped to a single dimmer line, and a post that is
   *nothing but* image links collapses to a compact **"Image post"** label rather
   than rendering blank — the full, unmodified text (URLs included) is still in
-  the **⋯ → Show full post text** modal. The thumbnail is sized to be
-  **comfortably readable** (it scales with the viewport height and fills the
-  available lanes). Because an image card is image-first it is **taller than a
-  plain text card — it spans two lanes** instead of one, and the lane placement
-  **reserves that full two-lane footprint**: other cards are never laid over the
-  picture, and an image card is never started low enough to spill past the bottom
-  edge, so image cards neither overlap their neighbours nor overflow the screen.
-  The thumbnail box has a preferred height but **shrinks before the card clips
-  it**, so even on short screens the bottom of the image is never cut off; its
-  rendered width still tracks the image so the horizontal lane layout (which also
-  reserves a little extra room for image cards) is unchanged.
+  the **⋯ → Show full post text** modal. Because an image card is image-first it
+  is **taller than a plain text card — it spans two lanes** instead of one, and
+  the lane placement **reserves that full two-lane footprint**: other cards are
+  never laid over the picture, and an image card is never started low enough to
+  spill past the bottom edge, so image cards neither overlap their neighbours nor
+  overflow the screen. The thumbnail **fills that reserved two-lane footprint** —
+  the card occupies exactly the height it reserves rather than floating short
+  inside a taller slot — and it **scales down with the viewport** so on short
+  screens the whole image still fits (letterboxed, never cropped) instead of
+  clipping. Image cards also get a slightly **wider horizontal estimate and an
+  extra lane cushion** than text cards, so the heavier two-lane picture keeps
+  clear air around its neighbours instead of packing tight against them.
   **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
   that shows the image **at up to its native size, downscaled only as much as
   needed to fit the viewport** — a much larger view without leaving the page.

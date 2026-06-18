@@ -20,7 +20,9 @@
   // collide; the per-note, content-aware estimate below replaces that.
   const MAX_NOTE_PX = 340; // .note max-width cap (px)
   const MIN_NOTE_PX = 120; // floor so tiny notes still reserve breathing room
-  const IMG_NOTE_PX = 220; // floor for image-bearing notes (thumbnail is wider)
+  const IMG_NOTE_PX = 240; // floor for image-bearing notes — wider than text so
+  // the 2-lane-tall image reads as a photo (landscape-ish) rather than a narrow
+  // column, and so its horizontal estimate is distinct from a text card's.
   const NOTE_VW_FRACTION = 0.6; // .note max-width: ...60vw
   const PAD_X = 10; // .note horizontal padding (px), both sides
   const AVATAR_PX = 18; // .avatar width
@@ -29,6 +31,11 @@
   const AUTHOR_FONT = 12; // .note .author font-size
   const GAP_PX = 8; // base horizontal gap reserved between adjacent notes
   const LANE_BUFFER_PX = 12; // extra cushion so same-lane neighbours never kiss
+  // Image cards are 2 lanes tall and visually heavy; reserve a little extra
+  // lane-time around them (on top of the shared cushion) so neighbours don't
+  // pack edge-to-edge against the picture. This is the per-image "wider lane
+  // occupancy rule" beyond the bare 2-lane vertical span.
+  const IMG_BUFFER_PX = 20;
   // Vertical footprint, in lanes, that a card occupies for collision avoidance.
   // A plain text card is capped to a single lane by CSS (.note max-height:
   // calc((100%/6) - 8px)). An image card is image-first and intentionally taller
@@ -317,8 +324,12 @@
       // anchor, so reserving up to `ms + busyMs` is exactly right.
       // Content-aware (vs. the old single MAX width for every note): short notes
       // free their lane sooner, wide notes hold it longer so they can't collide.
+      // Image cards get an extra horizontal cushion (IMG_BUFFER_PX) so the
+      // 2-lane-tall picture keeps clear air around its neighbours instead of
+      // packing tight against them.
+      const cushion = GAP_PX + LANE_BUFFER_PX + (images.length > 0 ? IMG_BUFFER_PX : 0);
       const busyMs = measured
-        ? win * Math.min((estNotePx(name(note), display, maxNotePx, images.length > 0) + GAP_PX + LANE_BUFFER_PX) / containerW, 1)
+        ? win * Math.min((estNotePx(name(note), display, maxNotePx, images.length > 0) + cushion) / containerW, 1)
         : win * FALLBACK_BUSY_FRACTION;
       // Reserve every lane this card spans vertically, so a taller image card
       // holds its whole footprint busy for that time and nothing is placed over
@@ -845,12 +856,21 @@
     outline-offset: 1px;
   }
 
-  /* Image-first cards get a taller preferred thumbnail to match their larger
-     card cap. Still `flex: 0 1 auto; min-height: 0` (inherited), so it keeps
-     shrinking before the card clips it — the whole-image `contain` behaviour is
-     unchanged, it just starts from a bigger size. */
+  /* Image-first cards: make the thumbnail FILL the card's reserved 2-lane
+     footprint instead of sitting at a fixed preferred height that often left a
+     short card floating inside a tall 2-lane slot (an awkward empty band) on
+     desktop, while still being too tall on short viewports.
+
+     Trick: the preferred height (60vh) is deliberately larger than any 2-lane
+     card cap, so the inherited `flex: 0 1 auto; min-height: 0` shrink pulls the
+     box DOWN to exactly the space the card has left after head-row + caption —
+     i.e. the image always occupies the full height it reserves, on every
+     viewport, and scales down proportionally on short screens. The whole-image
+     `contain` behaviour (letterboxed, never cropped) is unchanged; only the box
+     height changes. The card's own 2-lane `max-height` remains the hard ceiling,
+     so the picture can never exceed its reserved footprint. */
   .note.has-image .note-image {
-    height: clamp(150px, 22vh, 260px);
+    height: 60vh;
   }
 
   .note-image img {
