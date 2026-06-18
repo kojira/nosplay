@@ -91,6 +91,43 @@
     return Math.min(maxNotePx, Math.max(floor, total));
   }
 
+  /** http/https URLs in free text (mirrors src/lib/nostr/images.ts URL_RE). */
+  const CONTENT_URL_RE = /https?:\/\/[^\s<>"'()]+/gi;
+  /** Image file extensions, matched on the URL path (same set as images.ts). */
+  const IMG_EXT_RE = /\.(?:jpe?g|png|gif|webp|avif|bmp|svgz?)$/i;
+
+  /** True if `raw` is an http(s) image URL already shown as a thumbnail. */
+  function isImageUrl(raw: string, imageSet: Set<string>): boolean {
+    try {
+      const u = new URL(raw.trim());
+      if (imageSet.has(u.href)) return true;
+      return IMG_EXT_RE.test(u.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Card-only display text for an image-bearing note: strips the raw image-URL
+   * strings (the very URLs already rendered as a thumbnail) so the link text
+   * doesn't dominate the card body. Reuses the placement's `images` list to
+   * decide what counts as an attachment. Non-image text/links stay visible; a
+   * post that is *only* image URLs collapses to a compact neutral label instead
+   * of rendering blank. The raw `note.content` and the full-text modal (which
+   * re-derives from `note.content`) are untouched — this is display-only.
+   */
+  function cardText(display: string, images: string[]): string {
+    if (images.length === 0) return display;
+    const imageSet = new Set(images);
+    const stripped = display
+      .replace(CONTENT_URL_RE, (m) => (isImageUrl(m, imageSet) ? '' : m))
+      // Tidy the whitespace the removed URLs leave behind.
+      .replace(/[^\S\n]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+    return stripped || 'Image post';
+  }
+
   /** Measured timeline width (px); drives the busy-interval calculation. */
   let containerW = $state(0);
 
@@ -152,8 +189,10 @@
     isMuted: boolean;
     /** Previewable image URLs for this note (computed once per placement pass). */
     images: string[];
-    /** Content with legacy `#[i]` references rewritten to mention labels;
-     *  used for the card text and width estimate (note.content stays raw). */
+    /** Card-display content: legacy `#[i]` references rewritten to mention
+     *  labels and, on image notes, raw image-URL strings stripped (falling
+     *  back to a neutral "Image post" label when nothing else remains). Used
+     *  for the card text and width estimate; note.content stays raw. */
     display: string;
   }
 
@@ -219,9 +258,11 @@
       // Resolve image URLs once here, then reuse for both the lane-width
       // estimate and rendering (the template never re-scans the note).
       const images = getNoteImageUrls(note);
-      // Rewrite legacy `#[i]` mentions once here, then reuse for both the
-      // width estimate and the rendered card text (keeps the two in sync).
-      const display = formatNoteContent(note.content, note.tags);
+      // Rewrite legacy `#[i]` mentions, then (for image notes) strip the raw
+      // image-URL strings so the thumbnail leads instead of the link text.
+      // Computed once and reused for both the width estimate and the rendered
+      // card text (keeps the two in sync); the modal re-derives from raw content.
+      const display = cardText(formatNoteContent(note.content, note.tags), images);
       // Reuse the note's existing lane when known; only assign one the first
       // time we see it. New notes fit around the lanes already occupied this
       // pass, so overlaps stay reasonable while existing rows stay put.
@@ -697,12 +738,26 @@
     flex: 0 0 auto;
   }
 
-  /* On image cards the thumbnail is the point, so spend the limited lane height
-     on it: clamp the caption to 2 lines (vs 3) to hand the freed row to the
-     bigger `.note-image` without touching the lane `max-height` cap. */
+  /* Image cards are image-first: the thumbnail leads and the caption is a
+     secondary line. Image-URL strings are already stripped from the text (see
+     cardText()), so the caption is real prose or the neutral "Image post"
+     fallback. Clamp it to a single, slightly smaller, dimmer line so the
+     picture clearly dominates and the freed rows go to `.note-image`. */
   .note.has-image .content {
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-bottom: 1px;
+  }
+
+  /* Let an image card grow a little past the per-lane cap so the picture keeps
+     a real preferred height instead of collapsing to a thin strip on short
+     lanes. Bounded (extra ≈ one lane, hard-capped at 320px) so the card never
+     dominates the timeline or breaks the left-edge time anchoring / lane
+     layout — only its own vertical footprint changes. */
+  .note.has-image {
+    max-height: min(320px, calc((100% / 6) + 120px));
   }
 
   /* Inline image preview: a tap-to-enlarge thumbnail kept well within the card.
@@ -741,6 +796,14 @@
   .note-image:focus-visible {
     outline: 2px solid var(--accent-border);
     outline-offset: 1px;
+  }
+
+  /* Image-first cards get a taller preferred thumbnail to match their larger
+     card cap. Still `flex: 0 1 auto; min-height: 0` (inherited), so it keeps
+     shrinking before the card clips it — the whole-image `contain` behaviour is
+     unchanged, it just starts from a bigger size. */
+  .note.has-image .note-image {
+    height: clamp(150px, 22vh, 260px);
   }
 
   .note-image img {

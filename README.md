@@ -43,10 +43,16 @@ This project was built to fulfill the [requirements document (要件書)](https:
   image links in the post text. Only `http(s)` URLs are ever used as an
   `<img src>`. The card thumbnail shows the **whole** image (letterboxed if
   needed) rather than a top-cropped slice, so you can tell at a glance what the
-  picture is. The thumbnail is sized to be **comfortably readable** (it scales
-  with the viewport height and fills the available lane), and on image cards the
-  caption is clamped a little tighter to hand that room to the picture. The
-  thumbnail box has a preferred height but **shrinks before the card clips it**,
+  picture is. **Image cards are image-first**: the raw image-URL strings are
+  **hidden from the card body** (they'd otherwise dominate as long link text),
+  the remaining caption is clamped to a single dimmer line, and a post that is
+  *nothing but* image links collapses to a compact **"Image post"** label rather
+  than rendering blank — the full, unmodified text (URLs included) is still in
+  the **⋯ → Show full post text** modal. The thumbnail is sized to be
+  **comfortably readable** (it scales with the viewport height and fills the
+  available lane), and image cards are allowed to grow a little taller than a
+  plain text card so the picture keeps a real size. The thumbnail box has a
+  preferred height but **shrinks before the card clips it**,
   so even on short lanes the bottom of the image is never cut off; its rendered
   width still tracks the image so the lane layout (which reserves a little extra
   horizontal room for image cards) is unchanged.
