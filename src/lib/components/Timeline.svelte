@@ -605,7 +605,7 @@
     <!-- The slot's LEFT edge is the FOOTPRINT OWNER's time anchor (left = (1 - f),
          C5) and its TOP comes from the pure 2D packer (stable for the note's
          lifetime, C4) — both stay pinned to p.note so the layout never shifts.
-         For an author stack the card CONTENT rotates: `front` is whichever folded
+         For a stack the card CONTENT rotates: `front` is whichever folded
          note is currently up (deterministic, playhead-driven; see frontNote), and
          every badge/avatar/content/image/interaction below is read off `front`,
          not the owner. The owner's frozen footprint is reused regardless of which
@@ -625,11 +625,11 @@
       style="left: {leftPct(p.note)}%; top: {p.y}px;"
     >
       {#if p.count > 1}
-        <!-- Thin offset cards behind the front, hinting "more from this author"
+        <!-- Thin offset cards behind the front, hinting "more notes"
              without enlarging the footprint. Purely decorative. -->
         <span class="stack-card stack-2" aria-hidden="true"></span>
         <span class="stack-card stack-1" aria-hidden="true"></span>
-        <span class="stack-count" aria-label={`${p.count} notes from this author`}>×{p.count}</span>
+        <span class="stack-count" aria-label={`${p.count} stacked notes`}>×{p.count}</span>
       {/if}
       <!-- Keyed on the front note's id: for a plain card the key is constant so
            the element never remounts; for a stack the key changes on each
@@ -1010,13 +1010,14 @@
     object-fit: contain;
   }
 
-  /* ---- author stack (crowding fallback, PLAN.md §4.3.1) ----
-     When the packer cannot fit a same-author near note individually without
-     overlapping or overflowing, it folds it BEHIND a front card (the stack keeps
-     the front's single footprint). We render thin offset cards behind the front
-     to hint "more from this author", plus a ×N count badge. These behind cards
-     are purely decorative (the front keeps the full interactive card) and never
-     enlarge the footprint, so C2 stays satisfied automatically. */
+  /* ---- stack (crowding fallback, PLAN.md §4.3.1) ----
+     When the packer cannot fit a note individually without overlapping or
+     overflowing, it folds it BEHIND a front card (the stack keeps the front's
+     single footprint). Same-author fronts are preferred by the packer; an
+     emergency mixed front is only used after standalone placement failed. We
+     render thin offset cards behind the front plus a ×N count badge. These
+     behind cards are purely decorative (the front keeps the full interactive
+     card) and never enlarge the footprint, so C2 stays satisfied automatically. */
   .stack-card {
     position: absolute;
     top: 0;

@@ -213,10 +213,9 @@ export function packTimeline(items: LayoutInput[], H: number, cache: Map<string,
     //    a single full-height gap. Since `scanY` already proved no standalone slot
     //    exists at this x0 (step 2), an x-overlapping front is the only placement
     //    that keeps C1 without inventing vertical space.
-    //    Prefer a SAME-author x-overlapping front (PLAN §4.3.1: same-author stacks
-    //    only). Deterministic tiebreak: lowest y, then lowest x0. `placed` is
-    //    already in input = (created_at, id) order, so equal (y, x0) keeps the
-    //    earliest.
+    //    Prefer a SAME-author x-overlapping front (PLAN §4.3.1 author stacks).
+    //    Deterministic tiebreak: lowest y, then lowest x0. `placed` is already in
+    //    input = (created_at, id) order, so equal (y, x0) keeps the earliest.
     let front: Rect | null = null;
     for (const r of placed) {
       if (r.author !== it.author) continue;
@@ -226,13 +225,11 @@ export function packTimeline(items: LayoutInput[], H: number, cache: Map<string,
       }
     }
     if (front === null) {
-      // No near same-author card. As a last resort fold behind the nearest
-      // x-OVERLAPPING front of ANY author so the column shortage is still
-      // resolved by footprint reuse (C1 preserved, note never dropped). A
-      // column can only be fully blocked by cards that x-overlap it, so this
-      // branch always finds a front whenever step 2 failed because the column
-      // was actually crowded (as opposed to the card being taller than H, which
-      // leaves no x-overlapping card and is handled by the commit below).
+      // No same-author front is available. As a last resort fold behind the
+      // nearest x-OVERLAPPING front of ANY author so the column shortage is still
+      // resolved by footprint reuse (C1 preserved, note never dropped). This
+      // mixed fallback is deliberately after scanY failed, so it cannot steal a
+      // card that could have been placed standalone.
       for (const r of placed) {
         if (!xOverlap(r, it.x0, x1)) continue;
         const dx = Math.abs(r.x0 - it.x0);
