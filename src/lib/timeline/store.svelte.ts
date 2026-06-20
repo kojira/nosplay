@@ -906,11 +906,12 @@ export class TimelineStore {
     // choice alone.
     if (this.isLive) return;
     const now = Date.now();
-    // The restored/shared target predates the loaded history (the initial fetch
-    // only grabs the newest page). Sit there provisionally — so the note cap
-    // keeps the target region, not the live tail — and fetch the target-range
-    // slice before clamping, exactly like an explicit jumpTo.
-    if (ms < this.earliestMs) {
+    // The restored/shared target's window isn't loaded (the initial fetch only
+    // grabs the newest page). Sit there provisionally — so the note cap keeps
+    // the target region, not the live tail — and fetch the target-range slice
+    // before clamping, exactly like an explicit jumpTo. Use window coverage (not
+    // `earliestMs`) for the same reason jumpTo does, so the path is consistent.
+    if (ms < now && !this.#hasNotesInWindow(ms)) {
       this.isPlaying = false;
       this.playheadMs = clamp(ms, 0, now);
       await this.ensureHistoryFor(ms);
@@ -1359,7 +1360,14 @@ export class TimelineStore {
    * No-op when the loaded range already reaches the target.
    */
   async ensureHistoryFor(targetMs: number): Promise<void> {
-    if (this.earliestMs <= targetMs) return;
+    // Already have the target window loaded? nothing to fetch. NOTE: this is a
+    // window-coverage test, not `earliestMs <= targetMs`. A prior deep jump
+    // leaves earliestMs far in the past (the oldest fetched note), so a second
+    // jump to a *newer-but-still-deep* span (newer than that oldest note yet
+    // not actually loaded) would otherwise be skipped — landing on a stale/empty
+    // window until a reconnect reset earliestMs. Coverage of the target's own
+    // window is the correct condition.
+    if (this.#hasNotesInWindow(targetMs)) return;
     const authors = this.mode === 'follows' ? this.#followAuthors : FALLBACK_AUTHORS;
     if (authors.length === 0) return; // nothing to query against
     const relays = this.activeReadRelays;
@@ -1529,6 +1537,33 @@ export class TimelineStore {
    * No-op when the current window already contains a note (preserves the exact
    * landing for the common, non-sparse case) or when nothing is loaded.
    */
+  /**
+   * Whether any loaded note falls inside the visible window for a jump target,
+   * i.e. within `[targetMs - windowMs, targetMs]`. This is the coverage test
+   * that decides whether a jump must fetch (window empty → deep fetch) or can
+   * just seek (window already populated). It's a window check, deliberately
+   * distinct from `earliestMs <= targetMs`: after a deep jump earliestMs sits at
+   * the oldest fetched note, far below a *newer* deep target whose own window we
+   * have never loaded, so earliestMs would falsely report that target as
+   * covered. notes is sorted ascending by created_at; binary-search the first
+   * note at/after the window's left edge and check it's still at/before target.
+   */
+  #hasNotesInWindow(targetMs: number): boolean {
+    const arr = this.notes;
+    if (arr.length === 0) return false;
+    const leftMs = targetMs - this.windowMs;
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid].created_at * 1000 < leftMs) lo = mid + 1;
+      else hi = mid;
+    }
+    // arr[lo] is the first note at/after the window's left edge (if any). It is
+    // inside the window when it also sits at/before the target (right edge).
+    return lo < arr.length && arr[lo].created_at * 1000 <= targetMs;
+  }
+
   #anchorPlayheadToVisibleNote(): void {
     const arr = this.notes;
     if (arr.length === 0) return;
@@ -1561,8 +1596,13 @@ export class TimelineStore {
    */
   async jumpTo(ms: number): Promise<void> {
     const now = Date.now();
-    // Future / at-now / within loaded range: identical to a plain seek.
-    if (ms >= this.earliestMs) {
+    // Future / at-now, or a past target whose visible window is already loaded:
+    // identical to a plain seek (no fetch needed). We must NOT gate this on
+    // `earliestMs` alone — after one deep jump earliestMs sits at the oldest
+    // fetched note, so a second jump to a newer-but-still-deep span would pass
+    // `ms >= earliestMs` and wrongly take the no-fetch seek path, leaving the
+    // window empty until a reconnect. Use real window coverage instead.
+    if (ms >= now || this.#hasNotesInWindow(ms)) {
       this.seekTo(ms);
       return;
     }

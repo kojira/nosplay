@@ -347,23 +347,50 @@
   }
 
   // ---- author-stack rotation ----
-  // How long (ms of playback time) each stacked note stays in front before the
-  // next one rotates up. "A few seconds" — noticeable but not frantic.
+  // How long (wall-clock ms) each stacked note stays in front before the next
+  // one rotates up. "A few seconds" — noticeable but not frantic.
   const ROTATE_MS = 4000;
 
+  // Monotonic rotation counter that advances on a fixed WALL-CLOCK cadence while
+  // the timeline is playing/LIVE, and FREEZES while paused. Driving the front
+  // off this (rather than timeline.playheadMs) decouples the rotation speed from
+  // playback speed: playheadMs advances by `elapsed * speed` per frame, so a fast
+  // or slow speed used to make the front rotate faster/slower (and a paused-but-
+  // not-LIVE playhead, which is pinned, would also stall it for the wrong reason).
+  // This ticks once per ROTATE_MS of real time regardless of `speed`.
+  let rotateTick = $state(0);
+
+  // Whether the timeline clock is advancing (LIVE follows wall-clock now;
+  // isPlaying replays the past). When neither, the timeline is frozen and the
+  // front rotation must freeze with it.
+  const rotating = $derived(timeline.isLive || timeline.isPlaying);
+
+  // Wall-clock rotation timer: while `rotating`, advance rotateTick every
+  // ROTATE_MS of real time; while paused, stop the interval so the front holds.
+  // The effect re-runs when `rotating` flips, and its cleanup clears the timer,
+  // so the interval is torn down both on pause and on component destroy.
+  $effect(() => {
+    if (!rotating) return;
+    const handle = setInterval(() => {
+      rotateTick += 1;
+    }, ROTATE_MS);
+    return () => clearInterval(handle);
+  });
+
   /**
-   * The note currently shown in FRONT of an author stack. The index is derived
-   * purely from the playback clock (timeline.playheadMs / ROTATE_MS), so it is:
-   *  - deterministic — same playhead ⇒ same front, never Date.now()/random;
-   *  - self-advancing — playheadMs moves during playback and LIVE, so the front
-   *    rotates through every folded note in `order` on its own;
-   *  - auto-pausing — pausing stops the playhead (LIVE→pinned, or isPlaying off),
-   *    so the index freezes and rotation naturally stops while paused.
+   * The note currently shown in FRONT of an author stack. The index advances
+   * with `rotateTick`, a fixed wall-clock counter, so it is:
+   *  - speed-independent — it ticks once per ROTATE_MS of REAL time, not off the
+   *    speed-scaled playhead, so playback speed never changes the cadence;
+   *  - self-advancing — the timer bumps rotateTick while playing/LIVE, so the
+   *    front rotates through every folded note in `order` on its own;
+   *  - auto-pausing — the timer is gated on `rotating`, so pausing freezes the
+   *    counter and rotation naturally stops while paused.
    * A plain card (count === 1) always returns its sole note unchanged.
    */
   function frontNote(p: Placed): Note {
     if (p.count <= 1) return p.note;
-    const idx = Math.floor(timeline.playheadMs / ROTATE_MS) % p.order.length;
+    const idx = rotateTick % p.order.length;
     return p.order[idx];
   }
 
@@ -1035,23 +1062,34 @@
     box-sizing: border-box;
   }
 
-  /* Subtle entry as the front swaps to the next stacked note: a brief fade plus a
-     slight rise/settle — noticeable but quiet. The keyed remount (per front id)
-     replays it on each rotation. Disabled under reduced-motion. */
+  /* Entry as the front swaps to the next stacked note: the new front rotates in
+     around the Z axis (a slight rotate + a Y-axis tip for depth) while scaling up
+     and translating toward the viewer along Z, so it reads as "coming forward"
+     out of the stack rather than a flat fade. Perspective on the slot gives the
+     rotateY/translateZ real depth. The keyed remount (per front id) replays it on
+     each rotation. Disabled under reduced-motion (instant, see below). */
+  .note-slot.is-stack {
+    perspective: 600px;
+  }
   @keyframes stackRotateIn {
     from {
-      opacity: 0.4;
-      transform: translateY(4px) scale(0.985);
+      opacity: 0.55;
+      transform: rotateZ(-6deg) rotateY(14deg) translateZ(-60px) scale(0.94);
     }
     to {
       opacity: 1;
-      transform: translateY(0) scale(1);
+      transform: rotateZ(0deg) rotateY(0deg) translateZ(0) scale(1);
     }
   }
   .note-slot.is-stack .note.rotate-in {
-    animation: stackRotateIn 0.32s ease-out;
+    transform-origin: center center;
+    animation: stackRotateIn 0.4s cubic-bezier(0.2, 0.7, 0.2, 1);
   }
+  /* Reduced motion: no rotation/scale/Z motion — appear instantly. */
   @media (prefers-reduced-motion: reduce) {
+    .note-slot.is-stack {
+      perspective: none;
+    }
     .note-slot.is-stack .note.rotate-in {
       animation: none;
     }

@@ -204,11 +204,19 @@ export function packTimeline(items: LayoutInput[], H: number, cache: Map<string,
 
     // 3. No individual placement fits without overlapping or overflowing H →
     //    author-stack fallback (C2 stays inviolate; the note is never dropped).
-    //    Find an already-placed SAME-author card whose padded x-interval is near
-    //    /overlapping this one, and fold this id behind it (the stack keeps the
-    //    front's footprint, so no new vertical space is needed).
-    //    Deterministic tiebreak: lowest y, then lowest x0. `placed` is already in
-    //    input = (created_at, id) order, so equal (y, x0) keeps the earliest.
+    //    A fold only resolves the vertical shortage when the front actually SHARES
+    //    this card's x-column: the stack reuses the front's footprint, so a card
+    //    that does NOT x-overlap would still demand its own (unavailable) vertical
+    //    slot. We therefore only ever fold behind an x-OVERLAPPING front. Folding
+    //    behind a non-overlapping (distant) card was over-eager — it stacked notes
+    //    that shared no column with their front even when the column merely lacked
+    //    a single full-height gap. Since `scanY` already proved no standalone slot
+    //    exists at this x0 (step 2), an x-overlapping front is the only placement
+    //    that keeps C1 without inventing vertical space.
+    //    Prefer a SAME-author x-overlapping front (PLAN §4.3.1: same-author stacks
+    //    only). Deterministic tiebreak: lowest y, then lowest x0. `placed` is
+    //    already in input = (created_at, id) order, so equal (y, x0) keeps the
+    //    earliest.
     let front: Rect | null = null;
     for (const r of placed) {
       if (r.author !== it.author) continue;
@@ -218,14 +226,15 @@ export function packTimeline(items: LayoutInput[], H: number, cache: Map<string,
       }
     }
     if (front === null) {
-      // No near same-author card. Try to place THIS item as a (new) front using
-      // the same deterministic scan but relaxing the H ceiling as a last resort
-      // is NOT allowed (C2). Instead: attach to the nearest same-author placed
-      // card regardless of x-proximity; if there is truly no same-author card at
-      // all, attach to the nearest placed card by x so the note is never dropped.
-      const sameAuthor = placed.filter((r) => r.author === it.author);
-      const pool = sameAuthor.length > 0 ? sameAuthor : placed;
-      for (const r of pool) {
+      // No near same-author card. As a last resort fold behind the nearest
+      // x-OVERLAPPING front of ANY author so the column shortage is still
+      // resolved by footprint reuse (C1 preserved, note never dropped). A
+      // column can only be fully blocked by cards that x-overlap it, so this
+      // branch always finds a front whenever step 2 failed because the column
+      // was actually crowded (as opposed to the card being taller than H, which
+      // leaves no x-overlapping card and is handled by the commit below).
+      for (const r of placed) {
+        if (!xOverlap(r, it.x0, x1)) continue;
         const dx = Math.abs(r.x0 - it.x0);
         if (front === null) {
           front = r;
@@ -238,8 +247,10 @@ export function packTimeline(items: LayoutInput[], H: number, cache: Map<string,
       }
     }
     if (front === null) {
-      // Nothing placed yet at all (e.g. the very first item is taller than H).
-      // Place it at y = 0 clamped so it still owns a footprint — we never drop.
+      // No x-overlapping card at all: the card is simply taller than H (scanY
+      // rejected every candidate on the C2 ceiling, not on overlap). There is no
+      // valid stack front, so place it at y = 0 so it still owns a footprint — we
+      // never drop.
       commit(it, 0);
       continue;
     }
