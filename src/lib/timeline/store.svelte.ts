@@ -547,6 +547,13 @@ export class TimelineStore {
   // A view range from a share link (?start=&end=), applied during connect() so
   // it overrides persisted playback. Epoch ms; either bound may be undefined.
   #pendingShare: { startMs?: number; endMs?: number } | null = null;
+  /**
+   * Monotonic token for user-directed playhead changes. Startup restore/share
+   * links may await relay history before settling; if the user hits Jump/LIVE/etc.
+   * meanwhile, the stale startup continuation must not overwrite that newer
+   * destination (the share-start/end -> later Jump repro).
+   */
+  #playheadIntent = 0;
 
   /** Relays to publish to (mirrors the active read relays in scope here). */
   get writeRelays(): string[] {
@@ -897,6 +904,11 @@ export class TimelineStore {
     };
   }
 
+  #claimPlayheadIntent(): number {
+    this.#playheadIntent += 1;
+    return this.#playheadIntent;
+  }
+
   /** Apply a restored paused playhead once real history (earliestMs) is known. */
   async #applyPendingPlayhead(): Promise<void> {
     if (this.#pendingPlayheadMs === null) return;
@@ -914,7 +926,9 @@ export class TimelineStore {
     if (ms < now && !this.#hasNotesInWindow(ms)) {
       this.isPlaying = false;
       this.playheadMs = clamp(ms, 0, now);
-      await this.ensureHistoryFor(ms);
+      const restoreIntent = this.#playheadIntent;
+      await this.ensureHistoryFor(ms, () => this.#playheadIntent === restoreIntent);
+      if (this.#playheadIntent !== restoreIntent) return;
       if (this.isLive) return; // user went LIVE mid-fetch
     }
     this.playheadMs = clamp(ms, this.earliestMs, now);
@@ -1277,6 +1291,7 @@ export class TimelineStore {
    */
   pause(): void {
     if (this.isLive) {
+      this.#claimPlayheadIntent();
       this.isLive = false;
       this.playheadMs = Date.now();
       this.#scheduleSave();
@@ -1290,6 +1305,7 @@ export class TimelineStore {
 
   /** Shift the playhead by deltaMs (e.g. -60000 / +60000). Turns LIVE off; clamps. */
   nudge(deltaMs: number): void {
+    this.#claimPlayheadIntent();
     this.isLive = false;
     this.#stopSpeech();
     const now = Date.now();
@@ -1314,6 +1330,7 @@ export class TimelineStore {
 
   /** Re-follow wall-clock now. */
   goLive(): void {
+    this.#claimPlayheadIntent();
     // Drop any past-playback speech (and its playhead marker) before jumping to
     // the live edge, so a half-read past note doesn't talk over fresh arrivals.
     this.#stopSpeech();
@@ -1326,6 +1343,7 @@ export class TimelineStore {
 
   /** Jump the playhead to an absolute epoch-ms; turns LIVE off and clamps. */
   seekTo(ms: number): void {
+    this.#claimPlayheadIntent();
     const now = Date.now();
     this.isLive = false;
     this.#stopSpeech();
@@ -1359,7 +1377,7 @@ export class TimelineStore {
    *
    * No-op when the loaded range already reaches the target.
    */
-  async ensureHistoryFor(targetMs: number): Promise<void> {
+  async ensureHistoryFor(targetMs: number, isCurrent: () => boolean = () => true): Promise<void> {
     // Already have the target window loaded? nothing to fetch. NOTE: this is a
     // window-coverage test, not `earliestMs <= targetMs`. A prior deep jump
     // leaves earliestMs far in the past (the oldest fetched note), so a second
@@ -1372,12 +1390,6 @@ export class TimelineStore {
     if (authors.length === 0) return; // nothing to query against
     const relays = this.activeReadRelays;
 
-    // The jump fetches the bounded slice ending at the target; anchor the
-    // forward coverage edge there so #prefetchForward fills the gap toward now
-    // chunk-by-chunk as playback advances, instead of the window emptying once
-    // the slice is consumed.
-    this.#coverageEndMs = Math.min(targetMs, Date.now());
-
     this.historyLoading = true;
     try {
       const got = await this.#fetchTargetRange(targetMs, authors, relays);
@@ -1387,6 +1399,13 @@ export class TimelineStore {
       if (!got && this.earliestMs > targetMs) {
         await this.#fetchOlderUntil(targetMs, authors, relays);
       }
+      if (!isCurrent()) return;
+      // The jump fetches the bounded slice ending at the target; anchor the
+      // forward coverage edge there so #prefetchForward fills the gap toward now
+      // chunk-by-chunk as playback advances, instead of the window emptying once
+      // the slice is consumed. Stale share/deep-jump fetches must not overwrite
+      // this after a later UI Jump has claimed the playhead.
+      this.#coverageEndMs = Math.min(targetMs, Date.now());
     } finally {
       this.historyLoading = false;
     }
@@ -1595,6 +1614,7 @@ export class TimelineStore {
    * preserved.
    */
   async jumpTo(ms: number): Promise<void> {
+    const jumpIntent = this.#claimPlayheadIntent();
     const now = Date.now();
     // Future / at-now, or a past target whose visible window is already loaded:
     // identical to a plain seek (no fetch needed). We must NOT gate this on
@@ -1613,7 +1633,8 @@ export class TimelineStore {
     this.isPlaying = false;
     this.#stopSpeech();
     this.playheadMs = clamp(ms, 0, now);
-    await this.ensureHistoryFor(ms);
+    await this.ensureHistoryFor(ms, () => this.#playheadIntent === jumpIntent);
+    if (this.#playheadIntent !== jumpIntent) return;
     this.playheadMs = clamp(ms, this.earliestMs, now);
     if (this.playheadMs >= now) {
       this.isLive = true;
