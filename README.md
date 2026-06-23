@@ -42,23 +42,32 @@ This project was built to fulfill the [requirements document (要件書)](https:
   readable text, author/timestamp context, and images; opening it pauses LIVE or
   replay, and closing it resumes only if the timeline had been advancing. The
   currently frontmost note still drives the card's
-  badges/avatar/content/image/⋯-menu/lightbox/full-text interactions. The
+  badges/avatar/content/image/⋯-menu/lightbox/full-text interactions. Plain
+  (non-stacked) cards now follow the same first-click flow: clicking one opens a
+  single-note expanded modal, pauses LIVE or replay the same way, and closes
+  back to the exact previous playback state with **Esc** / backdrop / **Close**.
+  The modal contains the **Open on njump.me** action, so the timeline itself no
+  longer jumps away on first click. The
   rotation order is **deterministic** (derived from the playback clock, not
   `Date.now()`/random) and it advances with playback and LIVE but **stops while
   paused** — pausing freezes the playhead, so the front holds on the note you
   paused on. The card stays clipped to the footprint the packer reserved, so
   rotating never reintroduces overlap.
-- **Open on njump** — **clicking (or pressing Enter/Space on) a note opens that
-  specific event on [njump.me](https://njump.me) in a new tab** (`https://njump.me/<note1…>`,
-  with the `note1` id encoded via NIP-19). The per-note options that the click
-  used to open now live behind a small **⋯** button on each card: **Show full
-  post text** opens the untruncated content (and any images) in a modal, and
-  **Mute / Unmute TTS for this author** permanently silences (or restores)
-  read-aloud for that note's author (pubkey). Muting takes effect immediately:
-  it drops any of that author's notes already queued for speech and cuts off
-  their note if it is being read at that moment. Muted authors are dimmed with a
-  🔇 badge and still appear in the timeline; the mute list persists across
-  reloads (see *Persistence*) and can be undone from the same menu.
+- **Expanded note modal + njump handoff** — **clicking (or pressing Enter/Space
+  on) any timeline note first opens an in-app modal** instead of navigating
+  away. Stack cards open the existing full stack view; non-stacked cards open a
+  single-note enlarged view. From there, each note exposes an **Open on
+  njump.me** action that opens that specific event in a new tab
+  (`https://njump.me/<note1…>`, with the `note1` id encoded via NIP-19). The
+  per-note options still live behind the small **⋯** button on each timeline
+  card: **Show full post text** opens the untruncated content (and any images)
+  in a modal, and **Mute / Unmute TTS for this author** permanently silences (or
+  restores) read-aloud for that note's author (pubkey). Muting takes effect
+  immediately: it drops any of that author's notes already queued for speech and
+  cuts off their note if it is being read at that moment. Muted authors are
+  dimmed with a 🔇 badge and still appear in the timeline; the mute list
+  persists across reloads (see *Persistence*) and can be undone from the same
+  menu.
 - **Image previews** — notes that carry images show an inline thumbnail on the
   card, sourced (in priority order) from NIP-92 `imeta` tags, NIP-94-style `url`
   tags (accepted when a sibling `m`/`mime` tag declares `image/*`), and direct
@@ -86,8 +95,8 @@ This project was built to fulfill the [requirements document (要件書)](https:
   that shows the image **at up to its native size, downscaled only as much as
   needed to fit the viewport** — a much larger view without leaving the page;
   press **Esc** (or click the **✕** button or the backdrop) to close it.
-  Clicking the rest of the card still opens the note on njump.me. When a note
-  has **multiple** images the card shows the first with a **+N** badge; the
+  Clicking the rest of the card opens the expanded note modal. When a note has
+  **multiple** images the card shows the first with a **+N** badge; the
   lightbox shows them all (stacked, each whole and uncropped), and the full set
   is also viewable in the **⋯ → Show full post text** modal (each links out to
   the original in a new tab). Broken or unreachable images fail gracefully — the

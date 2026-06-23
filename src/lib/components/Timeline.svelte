@@ -464,12 +464,12 @@
   let fullTextNote = $state<Note | null>(null);
   /** Note whose image(s) are shown enlarged in the lightbox, or null. */
   let lightboxNote = $state<Note | null>(null);
-  /** Full stack currently expanded in a modal, in deterministic stack order. */
-  let stackNotes = $state<Note[] | null>(null);
-  let stackResumeState: { wasLive: boolean; wasPlaying: boolean } | null = null;
+  /** Notes currently expanded in a modal. Plain cards pass one note; stacks pass all. */
+  let modalNotes = $state<Note[] | null>(null);
+  let modalResumeState: { wasLive: boolean; wasPlaying: boolean } | null = null;
 
   /**
-   * Primary note action: open this specific event on njump.me in a new tab.
+   * Open this specific event on njump.me in a new tab from inside a modal.
    * `noopener,noreferrer` keeps the opened page from reaching back into this
    * one. A note whose id can't be encoded (shouldn't happen for real events)
    * falls back to opening its options menu so the click is never dead.
@@ -478,6 +478,10 @@
     const url = njumpUrl(note.id);
     if (url) window.open(url, '_blank', 'noopener,noreferrer');
     else openMenu(note);
+  }
+
+  function openNoteModal(note: Note): void {
+    openNotesModal([note]);
   }
 
   function openMenu(note: Note): void {
@@ -498,8 +502,8 @@
     menuNote = null;
   }
 
-  function openStack(p: Placed): void {
-    stackResumeState = {
+  function openNotesModal(notes: Note[]): void {
+    modalResumeState = {
       wasLive: timeline.isLive,
       wasPlaying: timeline.isPlaying,
     };
@@ -507,13 +511,17 @@
     menuNote = null;
     fullTextNote = null;
     lightboxNote = null;
-    stackNotes = p.order;
+    modalNotes = notes;
   }
 
-  function closeStack(): void {
-    const resume = stackResumeState;
-    stackNotes = null;
-    stackResumeState = null;
+  function openStack(p: Placed): void {
+    openNotesModal(p.order);
+  }
+
+  function closeModal(): void {
+    const resume = modalResumeState;
+    modalNotes = null;
+    modalResumeState = null;
     if (!resume) return;
     if (resume.wasLive) timeline.goLive();
     else if (resume.wasPlaying) timeline.play();
@@ -528,8 +536,8 @@
   // overlay element alone never fires. Scoped to the lightbox only — it no-ops
   // when the lightbox is closed, leaving the menu/full-text overlays untouched.
   function onWindowKey(e: KeyboardEvent): void {
-    if (e.key === 'Escape' && stackNotes) {
-      closeStack();
+    if (e.key === 'Escape' && modalNotes) {
+      closeModal();
       return;
     }
     if (e.key === 'Escape' && lightboxNote) lightboxNote = null;
@@ -538,12 +546,12 @@
   function onNoteKey(e: KeyboardEvent, p: Placed, note: Note): void {
     // Ignore keys that bubbled up from the inner ⋯ button (which has its own
     // activation), so pressing Enter there opens the menu without also opening
-    // njump.
+    // the note modal.
     if (e.currentTarget !== e.target) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       if (p.count > 1) openStack(p);
-      else openNote(note);
+      else openNoteModal(note);
     }
   }
 
@@ -558,9 +566,9 @@
   }
 
   /**
-   * Enlarge a note's image(s) in an in-app lightbox. The card click opens
-   * njump.me, so tapping the thumbnail must stop the event from bubbling up to
-   * the card — otherwise both would fire (njump would win by opening a new tab).
+   * Enlarge a note's image(s) in an in-app lightbox. The card click opens the
+   * note modal, so tapping the thumbnail must stop the event from bubbling up to
+   * the card — otherwise both would fire.
    */
   function openLightbox(e: MouseEvent, note: Note): void {
     e.stopPropagation();
@@ -679,8 +687,8 @@
           use:measure={{ id: p.note.id, on: p.count === 1 }}
           role="button"
           tabindex="0"
-          title={p.count > 1 ? `Show all ${p.count} stacked notes` : 'Open this note on njump.me (new tab) — use ⋯ for options'}
-          onclick={() => (p.count > 1 ? openStack(p) : openNote(front))}
+          title={p.count > 1 ? `Show all ${p.count} stacked notes` : 'Show this note in a modal'}
+          onclick={() => (p.count > 1 ? openStack(p) : openNoteModal(front))}
           onkeydown={(e) => onNoteKey(e, p, front)}
         >
           <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
@@ -806,20 +814,30 @@
     </div>
   {/if}
 
-  <!-- expanded stack modal -->
-  {#if stackNotes}
+  <!-- expanded note modal: one note for a plain card, or every note in a stack -->
+  {#if modalNotes}
     <div
       class="overlay"
       role="presentation"
-      onclick={closeStack}
-      onkeydown={(e) => onOverlayKey(e, closeStack)}
+      onclick={closeModal}
+      onkeydown={(e) => onOverlayKey(e, closeModal)}
     >
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="modal stack-modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Stacked notes" onclick={(e) => e.stopPropagation()}>
-        <div class="modal-head">Stacked notes ×{stackNotes.length}</div>
+      <div
+        class="modal stack-modal"
+        role="dialog"
+        tabindex="-1"
+        aria-modal="true"
+        aria-label={modalNotes.length > 1 ? 'Stacked notes' : 'Expanded note'}
+        onclick={(e) => e.stopPropagation()}
+      >
+        <div class="modal-head">
+          {modalNotes.length > 1 ? `Stacked notes ×${modalNotes.length}` : 'Expanded note'}
+        </div>
         <div class="stack-list">
-          {#each stackNotes as note (note.id)}
+          {#each modalNotes as note (note.id)}
+            {@const noteImages = imageUrls(note)}
             <article class="stack-note">
               <div class="stack-note-meta">
                 <span class="avatar" aria-hidden="true">
@@ -840,10 +858,18 @@
                   <time datetime={new Date(note.created_at * 1000).toISOString()}>{timestamp(note)}</time>
                 </div>
               </div>
+              <button
+                class="stack-note-link"
+                type="button"
+                title="Open this note on njump.me (new tab)"
+                onclick={() => openNote(note)}
+              >
+                Open on njump.me
+              </button>
               <div class="stack-note-body">{formatNoteContent(note.content, note.tags)}</div>
-              {#if imageUrls(note).length > 0}
-                <div class="modal-gallery" class:multi={imageUrls(note).length > 1}>
-                  {#each imageUrls(note) as src (src)}
+              {#if noteImages.length > 0}
+                <div class="modal-gallery" class:multi={noteImages.length > 1}>
+                  {#each noteImages as src (src)}
                     <a class="modal-image" href={src} target="_blank" rel="noreferrer noopener">
                       <img
                         {src}
@@ -860,7 +886,7 @@
             </article>
           {/each}
         </div>
-        <button class="menu-item" type="button" onclick={closeStack}>Close</button>
+        <button class="menu-item" type="button" onclick={closeModal}>Close</button>
       </div>
     </div>
   {/if}
@@ -1239,8 +1265,8 @@
     opacity: 0.7;
   }
 
-  /* Compact ⋯ affordance: opens the note's options (full text, mute TTS) that
-     the card click used to open, now that the click opens njump.me instead. */
+  /* Compact ⋯ affordance: opens note options (full text, mute TTS) while the
+     card body itself is reserved for the first-click expanded-note modal. */
   .note-menu-btn {
     position: absolute;
     top: 2px;
@@ -1415,6 +1441,25 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.03);
+  }
+
+  .stack-note-link {
+    appearance: none;
+    align-self: flex-start;
+    padding: 6px 10px;
+    border: 1px solid var(--accent-border);
+    border-radius: 999px;
+    background: var(--accent-bg);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .stack-note-link:hover,
+  .stack-note-link:focus-visible {
+    background: rgba(255, 255, 255, 0.08);
+    outline: none;
   }
 
   .stack-note-meta {
