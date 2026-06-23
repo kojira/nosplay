@@ -1,5 +1,7 @@
 # nosplay
 
+🔗 **Live:** https://kojira.github.io/nosplay
+
 A time-scrubbable [Nostr](https://nostr.com) timeline. Notes flow across a
 full-screen axis whose **right edge is the current moment** and whose left edge
 is `now − window`. You can pause, rewind, fast-forward, and seek through the
