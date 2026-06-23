@@ -1382,6 +1382,8 @@
   .modal {
     width: min(820px, 94%);
     max-height: 88%;
+    box-sizing: border-box;
+    overflow: hidden;
   }
 
   .modal-body {
@@ -1392,6 +1394,7 @@
     overflow-wrap: anywhere;
     overflow-y: auto;
     padding: 8px 4px;
+    min-height: 0;
   }
 
   .stack-modal {
@@ -1402,6 +1405,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-height: 0;
     overflow-y: auto;
     padding: 4px;
   }
@@ -1509,7 +1513,7 @@
     width: auto;
     max-width: 100%;
     height: auto;
-    max-height: 78vh;
+    max-height: min(52vh, 520px);
     margin: 0 auto;
     object-fit: contain;
   }
@@ -1539,6 +1543,7 @@
     flex-direction: column;
     align-items: center;
     gap: 12px;
+    width: 100%;
     max-width: 100%;
     max-height: 100%;
     overflow: auto;
@@ -1576,5 +1581,89 @@
     background: var(--accent-bg);
     color: var(--accent);
     outline: none;
+  }
+
+  @media (max-width: 640px) {
+    .overlay {
+      align-items: stretch;
+      justify-content: stretch;
+      padding: 8px;
+    }
+
+    .menu,
+    .modal {
+      border-radius: 8px;
+      padding: 10px;
+    }
+
+    .modal,
+    .stack-modal {
+      width: 100%;
+      max-height: calc(100dvh - 16px);
+    }
+
+    .modal-head {
+      flex: 0 0 auto;
+      font-size: 13px;
+      padding: 2px 2px 8px;
+    }
+
+    .modal-body {
+      flex: 1 1 auto;
+      font-size: 16px;
+      line-height: 1.6;
+      padding: 10px 2px;
+    }
+
+    .stack-list {
+      flex: 1 1 auto;
+      gap: 10px;
+      padding: 2px;
+    }
+
+    .stack-note {
+      gap: 9px;
+      padding: 10px;
+    }
+
+    .stack-note-body {
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    .modal-gallery,
+    .modal-gallery.multi {
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin: 6px 0;
+    }
+
+    .modal-image img,
+    .modal-gallery.multi .modal-image img {
+      width: auto;
+      max-width: 100%;
+      max-height: 34vh;
+    }
+
+    .lightbox {
+      padding: 8px;
+    }
+
+    .lightbox-inner {
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .lightbox-img {
+      max-width: 100%;
+      max-height: calc(100dvh - 72px);
+    }
+
+    .lightbox-close {
+      top: 8px;
+      right: 8px;
+      width: 38px;
+      height: 38px;
+    }
   }
 </style>

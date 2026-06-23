@@ -23,6 +23,10 @@
   // anchor to the playhead position. The real publish path only supports now.
   let postMode = $state<'current' | 'playback'>('current');
   let posting = $state(false);
+  let playbackOpen = $state(true);
+  let timelineSettingsOpen = $state(true);
+  let ttsOpen = $state(true);
+  let postOpen = $state(true);
 
   const SPEED_OPTIONS = [1, 1.5, 2, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50];
   /** Drop trailing ".0" so 1× / 1.5× / 20× all read cleanly. */
@@ -335,6 +339,14 @@
     }
   }
 
+  function setControlSectionsForViewport(isMobile: boolean): void {
+    const open = !isMobile;
+    playbackOpen = open;
+    timelineSettingsOpen = open;
+    ttsOpen = open;
+    postOpen = open;
+  }
+
   // ---- lifecycle -------------------------------------------------------
   let nowTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -351,6 +363,12 @@
     nowTimer = setInterval(() => {
       nowMs = Date.now();
     }, 250);
+    const controlsMq = window.matchMedia('(max-width: 640px)');
+    const onControlsMqChange = (e: MediaQueryListEvent): void => {
+      setControlSectionsForViewport(e.matches);
+    };
+    setControlSectionsForViewport(controlsMq.matches);
+    controlsMq.addEventListener('change', onControlsMqChange);
     // A share link (?start=&end=) stages a view range that connect() applies on
     // top of persisted playback, so the link wins. Absent params, behavior is
     // unchanged. Stage before connect() so it is consumed during startup.
@@ -358,6 +376,10 @@
     if (share) timeline.applyShareRange(share);
     // Connect on mount: opens relay sockets, fetches history, subscribes live.
     void timeline.connect();
+
+    return () => {
+      controlsMq.removeEventListener('change', onControlsMqChange);
+    };
   });
 
   onDestroy(() => {
@@ -522,309 +544,311 @@
       <span class="edge-label now">now</span>
     </div>
 
-    <div class="control-row">
-      <div class="group">
-        <button
-          class="primary"
-          onclick={() => timeline.togglePlay()}
-          aria-label={timeline.isPlaying ? 'Pause' : 'Play'}
-        >
-          {timeline.isPlaying ? '❚❚ Pause' : '▶ Play'}
-        </button>
-        <button onclick={() => timeline.nudge(-60_000)} title="Back 1 minute">−1m</button>
-        <button onclick={() => timeline.nudge(60_000)} title="Forward 1 minute">+1m</button>
-        <button class:active={timeline.isLive} onclick={() => timeline.goLive()}>● LIVE</button>
-        <button
-          onclick={onShare}
-          title="Copy a link to the current view range (start/end times)"
-        >
-          🔗 Share
-        </button>
-        {#if shareNotice}
-          <span class="share-notice" role="status">{shareNotice}</span>
-        {/if}
-      </div>
-
-      <div class="group">
-        <label class="field">
-          <span>Speed</span>
-          <select value={String(timeline.speed)} onchange={onSpeedChange}>
-            {#each SPEED_OPTIONS as s (s)}
-              <option value={String(s)}>{speedLabel(s)}</option>
-            {/each}
-          </select>
-        </label>
-
-        <label class="field">
-          <span>Recent window</span>
-          <select value={String(timeline.windowMs)} onchange={onWindowChange}>
-            {#each WINDOW_OPTIONS as w (w.ms)}
-              <option value={String(w.ms)}>{w.label}</option>
-            {/each}
-          </select>
-        </label>
-
-        <label class="field jump">
-          <span>Jump to</span>
-          <div class="jump-row">
-            <!-- No `min`: any past moment is selectable. A target older than the
-                 loaded history triggers a deep-history fetch on confirm rather
-                 than snapping back to the earliest loaded note. -->
-            <input
-              type="datetime-local"
-              bind:value={jumpValue}
-              max={toLocalInput(nowMs)}
-              oninput={() => (jumpEdited = true)}
-            />
-            <button
-              type="button"
-              onclick={confirmJump}
-              disabled={!jumpValid || timeline.historyLoading}
-              title="Seek the playhead to the chosen time (loads older history if needed; stops playback)"
-            >
-              {timeline.historyLoading ? 'Loading…' : 'Jump'}
-            </button>
-          </div>
-        </label>
-      </div>
-
-      <div class="group right">
-        <label class="field">
-          <span>Voice</span>
-          <select
-            value={timeline.selectedVoiceURI ?? ''}
-            onchange={onVoiceChange}
-            title="Choose a TTS voice (Auto = Japanese)"
+    <div class="control-sections">
+      <details class="control-section" bind:open={playbackOpen}>
+        <summary>Playback</summary>
+        <div class="section-body group">
+          <button
+            class="primary"
+            onclick={() => timeline.togglePlay()}
+            aria-label={timeline.isPlaying ? 'Pause' : 'Play'}
           >
-            <option value="">Auto (Japanese)</option>
-            {#each timeline.availableVoices as v (v.voiceURI)}
-              <option value={v.voiceURI}>{voiceLabel(v)}</option>
-            {/each}
-          </select>
-        </label>
-        <label class="field tts-rate">
-          <span>TTS speed</span>
-          <input
-            type="range"
-            min={TTS_RATE_MIN}
-            max={TTS_RATE_MAX}
-            step={TTS_RATE_STEP}
-            value={timeline.ttsRate}
-            oninput={onTtsRateInput}
-            title="Speech playback speed"
-          />
-          <output>{speedLabel(timeline.ttsRate)}</output>
-        </label>
-        <button
-          class:active={timeline.ttsEnabled}
-          onclick={() => timeline.toggleTts()}
-          title="Read new notes aloud"
-        >
-          🔊 TTS {timeline.ttsEnabled ? 'on' : 'off'}
-        </button>
-        <button
-          class:active={timeline.aiBgEnabled}
-          onclick={() => timeline.toggleAiBackground()}
-          title="Have on-device Gemini Nano generate a faint abstract SVG background directly from the visible timeline (no fallback; strictly validated before display)"
-        >
-          ✨ AI BG {timeline.aiBgEnabled ? 'on' : 'off'}
-        </button>
-      </div>
-    </div>
-
-    {#if timeline.aiBgEnabled}
-      <div
-        class="ai-status"
-        class:warn={timeline.aiBgStatus === 'unsupported' ||
-          timeline.aiBgStatus === 'unavailable' ||
-          timeline.aiBgStatus === 'invalid-svg' ||
-          timeline.aiBgStatus === 'error'}
-        role="status"
-      >
-        {aiBgLabel}
-      </div>
-
-      <!-- Always-visible AI summary: the current summary text (or a clear
-           placeholder), a state badge, and which slice it came from. Mirrors
-           the same status/debug snapshot as the debug panel below. -->
-      <div class="ai-summary-card" data-state={aiSummaryState} role="status">
-        <div class="ai-summary-head">
-          <span class="ai-summary-badge" data-tone={aiSummaryBadge.tone}>
-            {aiSummaryBadge.label}
-          </span>
-          <span class="ai-summary-meta">{aiSummaryMeta}</span>
-        </div>
-        <div
-          class="ai-summary-text"
-          class:placeholder={aiSummaryState !== 'available'}
-        >
-          {#if aiSummaryState === 'available'}
-            {timeline.aiBgSummary}
-          {:else if aiSummaryState === 'empty'}
-            {#if aiDebug.notEnoughText}
-              Not enough visible note text yet — need ~{aiDebug.charsNeeded} more
-              characters.
-            {:else}
-              Nothing distinct enough to summarize from the current view yet.
-            {/if}
-          {:else if aiSummaryState === 'waiting'}
-            Waiting for the first summary run…
-          {:else}
-            {aiBgLabel}
-          {/if}
-        </div>
-      </div>
-
-      <details class="ai-debug">
-        <summary>AI debug — Gemini Nano direct SVG: {aiDebug.directSvgUsed ? 'YES' : 'NO'}</summary>
-        <div class="ai-debug-body">
-          <!-- Headline verdict: did Gemini Nano generate valid SVG directly, and
-               did that result actually reach the screen? No fallback path exists,
-               so a NO means no background is drawn. -->
-          <div class="ai-verdict" role="status">
-            <span
-              class="ai-badge"
-              class:yes={aiDebug.directSvgUsed}
-              class:no={!aiDebug.directSvgUsed}
-            >
-              Direct SVG: {aiDebug.directSvgUsed ? 'YES' : 'NO'}
-            </span>
-            <span
-              class="ai-badge"
-              class:yes={aiDebug.svgValid}
-              class:no={!aiDebug.svgValid}
-            >
-              Validated: {aiDebug.svgValid ? 'YES' : 'NO'}
-            </span>
-            <span
-              class="ai-badge"
-              class:yes={aiVerdict.visible}
-              class:no={!aiVerdict.visible}
-            >
-              On screen: {aiVerdict.visible ? 'YES' : 'NO'}
-            </span>
-          </div>
-          {#if aiDebug.failureReason}
-            <div class="ai-verdict-reasons">
-              Failure: {aiDebug.failureReason}
-            </div>
-          {/if}
-          {#if aiVerdict.reasons.length}
-            <div class="ai-verdict-reasons">
-              Blocked by: {aiVerdict.reasons.join('; ')}.
-            </div>
-          {/if}
-          <div
-            class="ai-debug-summary"
-            class:placeholder={!timeline.aiBgSummary}
+            {timeline.isPlaying ? '❚❚ Pause' : '▶ Play'}
+          </button>
+          <button onclick={() => timeline.nudge(-60_000)} title="Back 1 minute">−1m</button>
+          <button onclick={() => timeline.nudge(60_000)} title="Forward 1 minute">+1m</button>
+          <button class:active={timeline.isLive} onclick={() => timeline.goLive()}>● LIVE</button>
+          <button
+            onclick={onShare}
+            title="Copy a link to the current view range (start/end times)"
           >
-            {#if timeline.aiBgSummary}
-              {timeline.aiBgSummary}
-            {:else if aiDebug.notEnoughText}
-              Not enough text to summarize yet — need ~{aiDebug.charsNeeded} more
-              characters of visible note text.
-            {:else if aiHasRun}
-              No summary produced yet.
-            {:else}
-              Waiting for the first generation run…
-            {/if}
-          </div>
-          <!-- Live, editable view of the prompts in use. These bind directly to
-               timeline state, so edits take effect (user prompt live; system
-               prompt on next model start). -->
-          <div class="ai-prompt-editor">
-            <label>
-              <span>system prompt (applies on next model start)</span>
-              <textarea bind:value={timeline.aiSystemPrompt} rows="3"></textarea>
-            </label>
-            <label>
-              <span>user prompt ({'{summary}'} is replaced with the feed text)</span>
-              <textarea bind:value={timeline.aiUserPrompt} rows="3"></textarea>
-            </label>
-          </div>
-          <dl class="ai-debug-meta">
-            <div>
-              <dt>Prompt API</dt>
-              <dd>
-                {aiDebug.promptApiSupported ? 'supported' : 'unsupported'} · {aiDebug.promptApiAvailability}{aiDebug.svgModelReady ? ' · model ready' : ''}
-              </dd>
-            </div>
-            <div><dt>source range</dt><dd>{aiSliceLabel}</dd></div>
-            <div><dt>window</dt><dd>{aiWindowLabel}</dd></div>
-            <div>
-              <dt>notes</dt>
-              <dd>{aiDebug.summarizedCount} summarized / {aiDebug.visibleCount} visible</dd>
-            </div>
-            <div>
-              <dt>input</dt>
-              <dd>{aiDebug.inputChars} chars{aiDebug.inputTruncated ? ' (truncated)' : ''}</dd>
-            </div>
-            <div><dt>summary</dt><dd>{aiDebug.summaryChars} chars</dd></div>
-            <div>
-              <dt>raw svg</dt>
-              <dd>{aiDebug.rawSvgChars} chars{aiDebug.rawSvgChars === 0 ? ' (none)' : ''}</dd>
-            </div>
-            <div>
-              <dt>shown svg</dt>
-              <dd>{aiDebug.svgChars} chars{aiDebug.svgChars === 0 ? ' (none)' : ''}</dd>
-            </div>
-            <div><dt>render</dt><dd>{aiRenderLabel}</dd></div>
-            <div>
-              <dt>in DOM</dt>
-              <dd>
-                {aiDebug.domCheckedAt === 0
-                  ? '—'
-                  : aiDebug.domInserted
-                    ? `yes (${aiDebug.domSvgChars} chars)`
-                    : 'no'}
-              </dd>
-            </div>
-            <div><dt>viewBox</dt><dd>{aiDebug.viewBox || '—'}</dd></div>
-            <div><dt>layer</dt><dd>{aiDomLabel}</dd></div>
-            <div>
-              <dt>last run</dt>
-              <dd>{aiHasRun ? hms(aiDebug.lastRunAt) : '—'}</dd>
-            </div>
-          </dl>
+            🔗 Share
+          </button>
+          {#if shareNotice}
+            <span class="share-notice" role="status">{shareNotice}</span>
+          {/if}
         </div>
       </details>
-    {/if}
 
-    <!-- composer at the very bottom -->
-    <div class="composer-row">
-      <textarea
-        class="composer"
-        bind:value={composer}
-        placeholder={canPost
-          ? 'Write a note… (⌘/Ctrl+Enter to post)'
-          : 'Install a NIP-07 extension (window.nostr) to post'}
-        rows="1"
-        disabled={!canPost || posting}
-        onkeydown={onComposerKey}
-      ></textarea>
-      <label class="field">
-        <span>Post @</span>
-        <select bind:value={postMode}>
-          <option value="current">current time</option>
-          <option value="playback">playback position</option>
-        </select>
-      </label>
-      <button
-        class="primary"
-        onclick={submitPost}
-        disabled={!canPost || posting || composer.trim().length === 0}
-      >
-        {posting ? 'Posting…' : 'Post'}
-      </button>
+      <details class="control-section" bind:open={timelineSettingsOpen}>
+        <summary>Timeline</summary>
+        <div class="section-body group">
+          <label class="field">
+            <span>Speed</span>
+            <select value={String(timeline.speed)} onchange={onSpeedChange}>
+              {#each SPEED_OPTIONS as s (s)}
+                <option value={String(s)}>{speedLabel(s)}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Recent window</span>
+            <select value={String(timeline.windowMs)} onchange={onWindowChange}>
+              {#each WINDOW_OPTIONS as w (w.ms)}
+                <option value={String(w.ms)}>{w.label}</option>
+              {/each}
+            </select>
+          </label>
+
+          <label class="field jump">
+            <span>Jump to</span>
+            <div class="jump-row">
+              <!-- No `min`: any past moment is selectable. A target older than the
+                   loaded history triggers a deep-history fetch on confirm rather
+                   than snapping back to the earliest loaded note. -->
+              <input
+                type="datetime-local"
+                bind:value={jumpValue}
+                max={toLocalInput(nowMs)}
+                oninput={() => (jumpEdited = true)}
+              />
+              <button
+                type="button"
+                onclick={confirmJump}
+                disabled={!jumpValid || timeline.historyLoading}
+                title="Seek the playhead to the chosen time (loads older history if needed; stops playback)"
+              >
+                {timeline.historyLoading ? 'Loading…' : 'Jump'}
+              </button>
+            </div>
+          </label>
+        </div>
+      </details>
+
+      <details class="control-section tts-section" bind:open={ttsOpen}>
+        <summary>TTS / Background</summary>
+        <div class="section-body group">
+          <label class="field">
+            <span>Voice</span>
+            <select
+              value={timeline.selectedVoiceURI ?? ''}
+              onchange={onVoiceChange}
+              title="Choose a TTS voice (Auto = Japanese)"
+            >
+              <option value="">Auto (Japanese)</option>
+              {#each timeline.availableVoices as v (v.voiceURI)}
+                <option value={v.voiceURI}>{voiceLabel(v)}</option>
+              {/each}
+            </select>
+          </label>
+          <label class="field tts-rate">
+            <span>TTS speed</span>
+            <input
+              type="range"
+              min={TTS_RATE_MIN}
+              max={TTS_RATE_MAX}
+              step={TTS_RATE_STEP}
+              value={timeline.ttsRate}
+              oninput={onTtsRateInput}
+              title="Speech playback speed"
+            />
+            <output>{speedLabel(timeline.ttsRate)}</output>
+          </label>
+          <button
+            class:active={timeline.ttsEnabled}
+            onclick={() => timeline.toggleTts()}
+            title="Read new notes aloud"
+          >
+            🔊 TTS {timeline.ttsEnabled ? 'on' : 'off'}
+          </button>
+          <button
+            class:active={timeline.aiBgEnabled}
+            onclick={() => timeline.toggleAiBackground()}
+            title="Have on-device Gemini Nano generate a faint abstract SVG background directly from the visible timeline (no fallback; strictly validated before display)"
+          >
+            ✨ AI BG {timeline.aiBgEnabled ? 'on' : 'off'}
+          </button>
+        </div>
+
+        {#if timeline.aiBgEnabled}
+          <div
+            class="ai-status"
+            class:warn={timeline.aiBgStatus === 'unsupported' ||
+              timeline.aiBgStatus === 'unavailable' ||
+              timeline.aiBgStatus === 'invalid-svg' ||
+              timeline.aiBgStatus === 'error'}
+            role="status"
+          >
+            {aiBgLabel}
+          </div>
+
+          <div class="ai-summary-card" data-state={aiSummaryState} role="status">
+            <div class="ai-summary-head">
+              <span class="ai-summary-badge" data-tone={aiSummaryBadge.tone}>
+                {aiSummaryBadge.label}
+              </span>
+              <span class="ai-summary-meta">{aiSummaryMeta}</span>
+            </div>
+            <div
+              class="ai-summary-text"
+              class:placeholder={aiSummaryState !== 'available'}
+            >
+              {#if aiSummaryState === 'available'}
+                {timeline.aiBgSummary}
+              {:else if aiSummaryState === 'empty'}
+                {#if aiDebug.notEnoughText}
+                  Not enough visible note text yet — need ~{aiDebug.charsNeeded} more
+                  characters.
+                {:else}
+                  Nothing distinct enough to summarize from the current view yet.
+                {/if}
+              {:else if aiSummaryState === 'waiting'}
+                Waiting for the first summary run…
+              {:else}
+                {aiBgLabel}
+              {/if}
+            </div>
+          </div>
+
+          <details class="ai-debug">
+            <summary>AI debug — Gemini Nano direct SVG: {aiDebug.directSvgUsed ? 'YES' : 'NO'}</summary>
+            <div class="ai-debug-body">
+              <div class="ai-verdict" role="status">
+                <span
+                  class="ai-badge"
+                  class:yes={aiDebug.directSvgUsed}
+                  class:no={!aiDebug.directSvgUsed}
+                >
+                  Direct SVG: {aiDebug.directSvgUsed ? 'YES' : 'NO'}
+                </span>
+                <span
+                  class="ai-badge"
+                  class:yes={aiDebug.svgValid}
+                  class:no={!aiDebug.svgValid}
+                >
+                  Validated: {aiDebug.svgValid ? 'YES' : 'NO'}
+                </span>
+                <span
+                  class="ai-badge"
+                  class:yes={aiVerdict.visible}
+                  class:no={!aiVerdict.visible}
+                >
+                  On screen: {aiVerdict.visible ? 'YES' : 'NO'}
+                </span>
+              </div>
+              {#if aiDebug.failureReason}
+                <div class="ai-verdict-reasons">
+                  Failure: {aiDebug.failureReason}
+                </div>
+              {/if}
+              {#if aiVerdict.reasons.length}
+                <div class="ai-verdict-reasons">
+                  Blocked by: {aiVerdict.reasons.join('; ')}.
+                </div>
+              {/if}
+              <div
+                class="ai-debug-summary"
+                class:placeholder={!timeline.aiBgSummary}
+              >
+                {#if timeline.aiBgSummary}
+                  {timeline.aiBgSummary}
+                {:else if aiDebug.notEnoughText}
+                  Not enough text to summarize yet — need ~{aiDebug.charsNeeded} more
+                  characters of visible note text.
+                {:else if aiHasRun}
+                  No summary produced yet.
+                {:else}
+                  Waiting for the first generation run…
+                {/if}
+              </div>
+              <div class="ai-prompt-editor">
+                <label>
+                  <span>system prompt (applies on next model start)</span>
+                  <textarea bind:value={timeline.aiSystemPrompt} rows="3"></textarea>
+                </label>
+                <label>
+                  <span>user prompt ({'{summary}'} is replaced with the feed text)</span>
+                  <textarea bind:value={timeline.aiUserPrompt} rows="3"></textarea>
+                </label>
+              </div>
+              <dl class="ai-debug-meta">
+                <div>
+                  <dt>Prompt API</dt>
+                  <dd>
+                    {aiDebug.promptApiSupported ? 'supported' : 'unsupported'} · {aiDebug.promptApiAvailability}{aiDebug.svgModelReady ? ' · model ready' : ''}
+                  </dd>
+                </div>
+                <div><dt>source range</dt><dd>{aiSliceLabel}</dd></div>
+                <div><dt>window</dt><dd>{aiWindowLabel}</dd></div>
+                <div>
+                  <dt>notes</dt>
+                  <dd>{aiDebug.summarizedCount} summarized / {aiDebug.visibleCount} visible</dd>
+                </div>
+                <div>
+                  <dt>input</dt>
+                  <dd>{aiDebug.inputChars} chars{aiDebug.inputTruncated ? ' (truncated)' : ''}</dd>
+                </div>
+                <div><dt>summary</dt><dd>{aiDebug.summaryChars} chars</dd></div>
+                <div>
+                  <dt>raw svg</dt>
+                  <dd>{aiDebug.rawSvgChars} chars{aiDebug.rawSvgChars === 0 ? ' (none)' : ''}</dd>
+                </div>
+                <div>
+                  <dt>shown svg</dt>
+                  <dd>{aiDebug.svgChars} chars{aiDebug.svgChars === 0 ? ' (none)' : ''}</dd>
+                </div>
+                <div><dt>render</dt><dd>{aiRenderLabel}</dd></div>
+                <div>
+                  <dt>in DOM</dt>
+                  <dd>
+                    {aiDebug.domCheckedAt === 0
+                      ? '—'
+                      : aiDebug.domInserted
+                        ? `yes (${aiDebug.domSvgChars} chars)`
+                        : 'no'}
+                  </dd>
+                </div>
+                <div><dt>viewBox</dt><dd>{aiDebug.viewBox || '—'}</dd></div>
+                <div><dt>layer</dt><dd>{aiDomLabel}</dd></div>
+                <div>
+                  <dt>last run</dt>
+                  <dd>{aiHasRun ? hms(aiDebug.lastRunAt) : '—'}</dd>
+                </div>
+              </dl>
+            </div>
+          </details>
+        {/if}
+      </details>
+
+      <details class="control-section post-section" bind:open={postOpen}>
+        <summary>Post</summary>
+        <div class="section-body composer-row">
+          <textarea
+            class="composer"
+            bind:value={composer}
+            placeholder={canPost
+              ? 'Write a note… (⌘/Ctrl+Enter to post)'
+              : 'Install a NIP-07 extension (window.nostr) to post'}
+            rows="1"
+            disabled={!canPost || posting}
+            onkeydown={onComposerKey}
+          ></textarea>
+          <label class="field">
+            <span>Post @</span>
+            <select bind:value={postMode}>
+              <option value="current">current time</option>
+              <option value="playback">playback position</option>
+            </select>
+          </label>
+          <button
+            class="primary"
+            onclick={submitPost}
+            disabled={!canPost || posting || composer.trim().length === 0}
+          >
+            {posting ? 'Posting…' : 'Post'}
+          </button>
+        </div>
+
+        {#if postMode === 'playback'}
+          <div class="hint" role="note">
+            Note: Nostr notes are always published at the real current time. This
+            build cannot back-date a note to the playback position
+            ({hms(timeline.playheadMs)}); it will be posted at now.
+          </div>
+        {/if}
+      </details>
     </div>
-
-    {#if postMode === 'playback'}
-      <div class="hint" role="note">
-        Note: Nostr notes are always published at the real current time. This
-        build cannot back-date a note to the playback position
-        ({hms(timeline.playheadMs)}); it will be posted at now.
-      </div>
-    {/if}
   </section>
 </main>
 
@@ -1083,19 +1107,25 @@
     height: 4px;
   }
 
-  .control-row {
+  .control-sections {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 18px;
     flex-wrap: wrap;
+  }
+  .control-section {
+    display: contents;
+  }
+  .control-section > summary {
+    display: none;
+  }
+  .section-body {
+    min-width: 0;
   }
   .group {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .group.right {
-    margin-left: auto;
   }
   .share-notice {
     font-size: 12px;
@@ -1367,15 +1397,78 @@
      Jump control stacks so the input can grow without squeezing the button out
      of view. Uses flex-wrap + min-width rather than fixed widths. */
   @media (max-width: 640px) {
+    .status {
+      gap: 4px;
+      font-size: 11px;
+    }
+    .status .edge {
+      max-width: 34vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .acct-row {
+      gap: 6px;
+    }
+    .acct-actions {
+      gap: 6px;
+    }
+    .acct-actions button {
+      padding: 5px 8px;
+    }
+    .relay-panel {
+      gap: 7px;
+      max-height: 42vh;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .relay-help {
+      display: none;
+    }
+    .relay-lists {
+      grid-template-columns: 1fr;
+      gap: 8px;
+    }
+    .relay-lists ul {
+      max-height: 5.5em;
+      overflow-y: auto;
+    }
+    .control-sections {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .control-section {
+      display: block;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.03);
+    }
+    .control-section > summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 32px;
+      padding: 6px 9px;
+      color: var(--text-h);
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+      list-style: revert;
+    }
+    .control-section[open] > summary {
+      border-bottom: 1px solid var(--border);
+    }
+    .control-section .section-body {
+      padding: 8px;
+    }
     /* Let each control group wrap and span the row instead of being crushed. */
     .group {
       flex-wrap: wrap;
     }
-    .group.right {
-      margin-left: 0;
-    }
     /* Fields take the full row so their selects/inputs aren't squeezed. */
-    .control-row .field {
+    .control-sections .field {
       flex: 1 1 100%;
     }
     /* Jump: stack the label above the row, and let the row wrap. */
@@ -1430,6 +1523,9 @@
       gap: 6px;
       padding: 6px 10px 8px;
     }
+    .seek-row {
+      gap: 7px;
+    }
     /* Composer is a bit shorter on mobile but still comfortably tappable. */
     .composer {
       min-height: 32px;
@@ -1460,6 +1556,19 @@
     .controls {
       gap: 5px;
       padding: 5px 8px 7px;
+    }
+    .brand {
+      gap: 5px;
+    }
+    .brand .title {
+      font-size: 14px;
+    }
+    .status .sep,
+    .status .edge {
+      display: none;
+    }
+    .account-bar {
+      font-size: 11px;
     }
     .ai-summary-text {
       max-height: 2.5em;
