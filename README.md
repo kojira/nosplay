@@ -91,17 +91,14 @@ This project was built to fulfill the [requirements document (要件書)](https:
   folded into the stack. The thumbnail is sized to a readable, viewport-aware
   height and the whole image always fits (letterboxed, never cropped) instead of
   being clipped.
-  **Tapping the thumbnail opens an in-app lightbox** (look for the **⤢** hint)
-  that shows the image **at up to its native size, downscaled only as much as
-  needed to fit the viewport** — a much larger view without leaving the page;
-  press **Esc** (or click the **✕** button or the backdrop) to close it.
-  Clicking the rest of the card opens the expanded note modal. When a note has
-  **multiple** images the card shows the first with a **+N** badge; the
-  lightbox shows them all (stacked, each whole and uncropped), and the full set
-  is also viewable in the **⋯ → Show full post text** modal (each links out to
-  the original in a new tab). Broken or unreachable images fail gracefully — the
-  thumbnail (or gallery slot) is removed instead of showing a broken-image
-  glyph.
+  Clicking anywhere on an image card, including the thumbnail, opens the
+  expanded note modal first. From that modal gallery, tapping an image opens the
+  in-app lightbox at up to its native size, downscaled only as much as needed to
+  fit the viewport; press **Esc** (or click the **✕** button or the backdrop) to
+  close it and return to the modal. When a note has **multiple** images the card
+  shows the first with a **+N** badge; the lightbox shows them all (stacked, each
+  whole and uncropped). Broken or unreachable images fail gracefully — the
+  thumbnail (or gallery slot) is removed instead of showing a broken-image glyph.
 - **Playback controls** — play/pause, −1m / +1m nudge, speed selector
   (1×–50×), a seek slider, and a **LIVE** button that re-follows wall-clock now.
   **Pause genuinely freezes the timeline** — including while LIVE: pausing from

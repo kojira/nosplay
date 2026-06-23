@@ -531,16 +531,18 @@
     if (e.key === 'Escape') close();
   }
 
-  // Close the image lightbox on Escape even when focus is still on the thumbnail
-  // button that opened it (which lives outside the overlay), so a keydown on the
-  // overlay element alone never fires. Scoped to the lightbox only — it no-ops
-  // when the lightbox is closed, leaving the menu/full-text overlays untouched.
+  // Close the image lightbox on Escape even when focus is still inside the modal
+  // gallery that opened it. Scoped to the lightbox only — it no-ops when the
+  // lightbox is closed, leaving the menu/full-text overlays untouched.
   function onWindowKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && lightboxNote) {
+      lightboxNote = null;
+      return;
+    }
     if (e.key === 'Escape' && modalNotes) {
       closeModal();
       return;
     }
-    if (e.key === 'Escape' && lightboxNote) lightboxNote = null;
   }
 
   function onNoteKey(e: KeyboardEvent, p: Placed, note: Note): void {
@@ -565,13 +567,8 @@
     openMenu(note);
   }
 
-  /**
-   * Enlarge a note's image(s) in an in-app lightbox. The card click opens the
-   * note modal, so tapping the thumbnail must stop the event from bubbling up to
-   * the card — otherwise both would fire.
-   */
-  function openLightbox(e: MouseEvent, note: Note): void {
-    e.stopPropagation();
+  /** Enlarge a note's image(s) in an in-app lightbox from inside a modal. */
+  function openLightbox(note: Note): void {
     lightboxNote = note;
   }
 
@@ -725,12 +722,9 @@
           </div>
           <span class="content">{fDisplay}</span>
           {#if fImages.length > 0}
-            <button
+            <span
               class="note-image"
-              type="button"
-              aria-label="Enlarge image"
-              title="Tap to enlarge"
-              onclick={(e) => openLightbox(e, front)}
+              aria-hidden="true"
             >
               <img
                 src={fImages[0]}
@@ -741,11 +735,10 @@
                 onload={() => p.count === 1 && onImageLoad(front.id)}
                 onerror={onNoteImageError}
               />
-              <span class="image-zoom-hint" aria-hidden="true">⤢</span>
               {#if fImages.length > 1}
                 <span class="image-count" aria-label={`${fImages.length} images`}>+{fImages.length - 1}</span>
               {/if}
-            </button>
+            </span>
           {/if}
         </div>
       {/key}
@@ -796,7 +789,7 @@
         {#if imageUrls(fullTextNote).length > 0}
           <div class="modal-gallery" class:multi={imageUrls(fullTextNote).length > 1}>
             {#each imageUrls(fullTextNote) as src (src)}
-              <a class="modal-image" href={src} target="_blank" rel="noreferrer noopener">
+              <button class="modal-image" type="button" aria-label="Enlarge image" onclick={() => fullTextNote && openLightbox(fullTextNote)}>
                 <img
                   {src}
                   alt="Note attachment"
@@ -805,7 +798,7 @@
                   referrerpolicy="no-referrer"
                   onerror={onNoteImageError}
                 />
-              </a>
+              </button>
             {/each}
           </div>
         {/if}
@@ -870,7 +863,7 @@
               {#if noteImages.length > 0}
                 <div class="modal-gallery" class:multi={noteImages.length > 1}>
                   {#each noteImages as src (src)}
-                    <a class="modal-image" href={src} target="_blank" rel="noreferrer noopener">
+                    <button class="modal-image" type="button" aria-label="Enlarge image" onclick={() => openLightbox(note)}>
                       <img
                         {src}
                         alt="Note attachment"
@@ -879,7 +872,7 @@
                         referrerpolicy="no-referrer"
                         onerror={onNoteImageError}
                       />
-                    </a>
+                    </button>
                   {/each}
                 </div>
               {/if}
@@ -892,7 +885,7 @@
   {/if}
 
   <!-- image lightbox: enlarges a note's image(s) in-app, near native size but
-       always fitted to the viewport. Opened by tapping a card thumbnail. -->
+       always fitted to the viewport. Opened from a modal gallery image. -->
   {#if lightboxNote}
     <div
       class="overlay lightbox"
@@ -1093,7 +1086,7 @@
     margin-bottom: 1px;
   }
 
-  /* Inline image preview: a tap-to-enlarge thumbnail. Its height is a stable,
+  /* Inline image preview. Its height is a stable,
      deterministic clamp (no longer tied to a fixed lane fraction): big enough to
      read on desktop, sensible on short/mobile viewports. Because the card height
      is now content-driven and the 2D packer reserves exactly the card's measured
@@ -1114,11 +1107,6 @@
     border-radius: 6px;
     overflow: hidden;
     background: rgba(255, 255, 255, 0.04);
-    cursor: zoom-in;
-  }
-  .note-image:focus-visible {
-    outline: 2px solid var(--accent-border);
-    outline-offset: 1px;
   }
 
   .note-image img {
@@ -1214,23 +1202,8 @@
     }
   }
 
-  /* A small "expand" affordance so it's obvious the thumbnail enlarges on tap
-     (it's purely decorative — the whole thumbnail is the button). */
-  .image-zoom-hint {
-    position: absolute;
-    left: 4px;
-    bottom: 4px;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: rgba(0, 0, 0, 0.55);
-    color: #fff;
-    font-size: 11px;
-    line-height: 1.5;
-    pointer-events: none;
-  }
-
   /* "+N" badge when a note carries more images than the single thumbnail shown.
-     The full set is viewable in the options → full-text modal gallery. */
+     The full set is viewable in the expanded-note modal gallery. */
   .image-count {
     position: absolute;
     right: 4px;
@@ -1514,11 +1487,21 @@
   }
 
   .modal-image {
+    appearance: none;
     display: block;
+    width: 100%;
+    padding: 0;
+    border: 0;
     border-radius: 8px;
     overflow: hidden;
     background: rgba(255, 255, 255, 0.04);
     text-align: center;
+    cursor: zoom-in;
+  }
+
+  .modal-image:focus-visible {
+    outline: 2px solid var(--accent-border);
+    outline-offset: 2px;
   }
 
   .modal-image img {
