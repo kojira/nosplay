@@ -1,5 +1,16 @@
 // Minimal, guarded wrapper around the Web Speech API (speechSynthesis).
 
+export const TTS_RATE_MIN = 0.5;
+export const TTS_RATE_MAX = 5;
+export const TTS_RATE_STEP = 0.1;
+export const TTS_RATE_DEFAULT = 1;
+
+/** Clamp a user/persisted TTS rate to the browser-facing supported range. */
+export function clampTtsRate(rate: number): number {
+  if (!Number.isFinite(rate)) return TTS_RATE_DEFAULT;
+  return Math.min(TTS_RATE_MAX, Math.max(TTS_RATE_MIN, rate));
+}
+
 /** True when the browser exposes speechSynthesis. */
 export function hasTts(): boolean {
   return typeof window !== 'undefined' && 'speechSynthesis' in window;
@@ -179,6 +190,7 @@ function findSelectedVoice(): SpeechSynthesisVoice | null {
 export function speak(
   text: string,
   callbacks?: { onStart?: () => void; onEnd?: () => void; onError?: () => void },
+  rate = TTS_RATE_DEFAULT,
 ): boolean {
   if (!hasTts()) return false;
   const cleaned = sanitizeForSpeech(text);
@@ -187,6 +199,7 @@ export function speak(
     primeVoices();
     if (!cachedJaVoice || !cachedEnVoice) refreshVoices(); // voices may have loaded since priming
     const utter = new SpeechSynthesisUtterance(cleaned.slice(0, 280));
+    utter.rate = clampTtsRate(rate);
     if (isEnglishText(cleaned)) {
       // English note: prefer an English browser voice; if none exists, fall back
       // to just tagging the utterance en-US and letting the engine choose.

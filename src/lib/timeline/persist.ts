@@ -12,6 +12,8 @@ export interface PlaybackState {
   windowMs: number;
   speed: number;
   ttsEnabled: boolean;
+  /** Web Speech utterance rate for TTS playback. */
+  ttsRate: number;
   /** User-selected TTS voice (voiceURI), or null for the Japanese auto-pick. */
   selectedVoiceURI: string | null;
   isLive: boolean;

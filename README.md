@@ -132,7 +132,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   [Share links](#share-links)).
 - **Text-to-speech** — optional read-aloud of new notes via the browser's
   Web Speech API. A **Voice** selector next to the TTS toggle lets you pick any
-  voice the browser offers; the list populates asynchronously (via
+  voice the browser offers, and a separate **TTS speed** slider sets speech
+  playback from **0.5× to 5.0×** without changing the timeline playback speed.
+  The list populates asynchronously (via
   `voiceschanged`) so it fills in even when voices load late. The default
   **Auto (Japanese)** option keeps the original behavior: a Japanese voice is
   selected when the browser offers one (and the utterance language defaults to
@@ -140,8 +142,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
   English voice. English-looking notes are automatically read with an English
   voice instead (auto-picked from the browser, falling back to `en-US` if none
   is available), while the Voice selection stays the Japanese baseline used for
-  non-English text. Your choice is stored by its stable `voiceURI`, persists across
-  reloads, and falls back to Auto if that voice is no longer available. URLs and
+  non-English text. Your voice and TTS speed choices persist across reloads; the
+  voice is stored by its stable `voiceURI` and falls back to Auto if that voice
+  is no longer available. URLs and
   Nostr identifiers (npub/note/etc.) are stripped or replaced before speaking so
   they aren't read aloud. The note currently being read aloud is highlighted in
   the timeline (a pulsing outline plus a 🔊 badge) so you can see which post is
@@ -186,8 +189,9 @@ This project was built to fulfill the [requirements document (要件書)](https:
 - **Relay settings** — inspect and edit the read relays the timeline fetches
   from, and choose how your manual list combines with the follow-derived one
   (see [Relays](#relays)).
-- **Persistence** — window size, speed, TTS toggle, the selected TTS voice, the
-  per-author TTS mute list, the **AI background** toggle, a paused playhead
+- **Persistence** — window size, timeline speed, TTS toggle, the selected TTS
+  voice, TTS speed, the per-author TTS mute list, the **AI background** toggle,
+  a paused playhead
   position, your relay settings (mode + manual list), and a "remember login"
   hint are saved to IndexedDB and restored on reload. Muting or un-muting an
   author is written immediately (not debounced), so the change survives a reload

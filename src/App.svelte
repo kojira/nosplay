@@ -7,6 +7,7 @@
   import { parseShareParams, buildShareUrl } from './lib/share';
   import { aiBgVerdict } from './lib/timeline/store.svelte';
   import type { RelayMode } from './lib/timeline/store.svelte';
+  import { TTS_RATE_MAX, TTS_RATE_MIN, TTS_RATE_STEP } from './lib/tts';
 
   // Module-level (survives component instances): a pending disconnect scheduled
   // by onDestroy(). On an immediate remount, onMount() cancels it so the
@@ -256,6 +257,10 @@
   function onVoiceChange(e: Event): void {
     const v = (e.currentTarget as HTMLSelectElement).value;
     timeline.setVoice(v === '' ? null : v);
+  }
+
+  function onTtsRateInput(e: Event): void {
+    timeline.setTtsRate(Number((e.currentTarget as HTMLInputElement).value));
   }
 
   function onSeekInput(e: Event): void {
@@ -596,6 +601,19 @@
               <option value={v.voiceURI}>{voiceLabel(v)}</option>
             {/each}
           </select>
+        </label>
+        <label class="field tts-rate">
+          <span>TTS speed</span>
+          <input
+            type="range"
+            min={TTS_RATE_MIN}
+            max={TTS_RATE_MAX}
+            step={TTS_RATE_STEP}
+            value={timeline.ttsRate}
+            oninput={onTtsRateInput}
+            title="Speech playback speed"
+          />
+          <output>{speedLabel(timeline.ttsRate)}</output>
         </label>
         <button
           class:active={timeline.ttsEnabled}
@@ -1094,6 +1112,15 @@
   }
   .field span {
     white-space: nowrap;
+  }
+  .tts-rate input {
+    width: 120px;
+    accent-color: var(--accent);
+  }
+  .tts-rate output {
+    min-width: 2.8em;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
   .jump-row {
     display: flex;

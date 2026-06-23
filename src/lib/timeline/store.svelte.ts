@@ -12,10 +12,12 @@ import { publishNote, hasNip07 } from '../nostr/post';
 import {
   speak,
   cancelSpeech,
+  clampTtsRate,
   hasTts,
   listVoices,
   onVoicesChanged,
   setSelectedVoiceURI,
+  TTS_RATE_DEFAULT,
 } from '../tts';
 import { loadPlayback, savePlayback } from './persist';
 import type { Note } from '../nostr/types';
@@ -335,6 +337,8 @@ export class TimelineStore {
   mode = $state<Mode>('limited');
   canPost = $state<boolean>(false);
   ttsEnabled = $state<boolean>(false);
+  /** Web Speech utterance rate for TTS playback. */
+  ttsRate = $state<number>(TTS_RATE_DEFAULT);
   /** Available speechSynthesis voices, refreshed on `voiceschanged`. */
   availableVoices = $state<SpeechSynthesisVoice[]>([]);
   /** User-selected TTS voice (voiceURI), or null for the Japanese auto-pick. */
@@ -768,6 +772,9 @@ export class TimelineStore {
       if (typeof saved.ttsEnabled === 'boolean') {
         this.ttsEnabled = saved.ttsEnabled;
       }
+      if (typeof saved.ttsRate === 'number') {
+        this.ttsRate = clampTtsRate(saved.ttsRate);
+      }
       // Only a non-empty string overrides the default (null = Japanese auto-pick).
       if (typeof saved.selectedVoiceURI === 'string' && saved.selectedVoiceURI) {
         this.selectedVoiceURI = saved.selectedVoiceURI;
@@ -846,6 +853,7 @@ export class TimelineStore {
         void this.windowMs;
         void this.speed;
         void this.ttsEnabled;
+        void this.ttsRate;
         void this.selectedVoiceURI;
         void this.isLive;
         void this.relayMode;
@@ -889,6 +897,7 @@ export class TimelineStore {
       windowMs: this.windowMs,
       speed: this.speed,
       ttsEnabled: this.ttsEnabled,
+      ttsRate: clampTtsRate(this.ttsRate),
       selectedVoiceURI: this.selectedVoiceURI,
       isLive: this.isLive,
       // Only meaningful when paused; harmless otherwise since restore ignores
@@ -1185,7 +1194,7 @@ export class TimelineStore {
       },
       onEnd: () => this.#finishTts(next.id),
       onError: () => this.#finishTts(next.id),
-    });
+    }, this.ttsRate);
     // Nothing was actually queued (empty after sanitize, or TTS unavailable):
     // no end callback will fire, so advance immediately. This is the fix for a
     // note being treated as "spoken" before speak() actually succeeded — an
@@ -1316,6 +1325,10 @@ export class TimelineStore {
 
   setSpeed(n: number): void {
     if (n > 0 && Number.isFinite(n)) this.speed = n;
+  }
+
+  setTtsRate(n: number): void {
+    this.ttsRate = clampTtsRate(n);
   }
 
   /**
