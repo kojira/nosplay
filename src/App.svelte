@@ -367,8 +367,14 @@
     const onControlsMqChange = (e: MediaQueryListEvent): void => {
       setControlSectionsForViewport(e.matches);
     };
+    const unlockTts = (): void => {
+      timeline.unlockTts();
+    };
     setControlSectionsForViewport(controlsMq.matches);
     controlsMq.addEventListener('change', onControlsMqChange);
+    window.addEventListener('pointerdown', unlockTts, { capture: true });
+    window.addEventListener('touchend', unlockTts, { capture: true });
+    window.addEventListener('keydown', unlockTts, { capture: true });
     // A share link (?start=&end=) stages a view range that connect() applies on
     // top of persisted playback, so the link wins. Absent params, behavior is
     // unchanged. Stage before connect() so it is consumed during startup.
@@ -379,6 +385,9 @@
 
     return () => {
       controlsMq.removeEventListener('change', onControlsMqChange);
+      window.removeEventListener('pointerdown', unlockTts, { capture: true });
+      window.removeEventListener('touchend', unlockTts, { capture: true });
+      window.removeEventListener('keydown', unlockTts, { capture: true });
     };
   });
 

@@ -47,11 +47,26 @@ export function sanitizeForSpeech(text: string): string {
 let cachedJaVoice: SpeechSynthesisVoice | null = null;
 let cachedEnVoice: SpeechSynthesisVoice | null = null;
 let voicesPrimed = false;
+let voiceRefreshScheduled = false;
+const voiceListeners = new Set<() => void>();
+let ttsUnlocked = false;
 
 // A user-selected voice, identified by its stable voiceURI. Null means "Auto"
 // (fall back to the Japanese auto-pick below). Stored as an id rather than a
 // SpeechSynthesisVoice reference because voice objects are recreated per call.
 let selectedVoiceURI: string | null = null;
+
+/** iPhone/iPad Safari commonly blocks the first speak() until a user gesture unlocks it. */
+function requiresGestureUnlock(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent;
+  const platform = navigator.platform;
+  const vendor = navigator.vendor;
+  const touchPoints = navigator.maxTouchPoints ?? 0;
+  const isAppleMobile =
+    /iP(?:ad|hone|od)/.test(ua) || (platform === 'MacIntel' && touchPoints > 1);
+  return isAppleMobile && /Apple/i.test(vendor) && /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS/i.test(ua);
+}
 
 /** True when a voice's language tag denotes Japanese (`ja`, `ja-JP`, …). */
 function isJapanese(voice: SpeechSynthesisVoice): boolean {
@@ -100,8 +115,20 @@ function refreshVoices(): void {
       cachedJaVoice = pickJapaneseVoice(voices);
       cachedEnVoice = pickEnglishVoice(voices);
     }
+    for (const listener of voiceListeners) listener();
   } catch {
     // ignore
+  }
+}
+
+/** Safari can populate voices late without reliably firing `voiceschanged`. */
+function scheduleVoiceRefreshes(): void {
+  if (voiceRefreshScheduled) return;
+  voiceRefreshScheduled = true;
+  for (const delay of [0, 250, 1000, 3000]) {
+    setTimeout(() => {
+      refreshVoices();
+    }, delay);
   }
 }
 
@@ -113,6 +140,7 @@ function primeVoices(): void {
   if (voicesPrimed) return;
   voicesPrimed = true;
   refreshVoices();
+  scheduleVoiceRefreshes();
   try {
     window.speechSynthesis.addEventListener?.('voiceschanged', refreshVoices);
   } catch {
@@ -139,9 +167,11 @@ export function listVoices(): SpeechSynthesisVoice[] {
 export function onVoicesChanged(cb: () => void): () => void {
   if (!hasTts()) return () => {};
   primeVoices();
+  voiceListeners.add(cb);
   try {
     window.speechSynthesis.addEventListener?.('voiceschanged', cb);
     return () => {
+      voiceListeners.delete(cb);
       try {
         window.speechSynthesis.removeEventListener?.('voiceschanged', cb);
       } catch {
@@ -149,7 +179,43 @@ export function onVoicesChanged(cb: () => void): () => void {
       }
     };
   } catch {
-    return () => {};
+    return () => {
+      voiceListeners.delete(cb);
+    };
+  }
+}
+
+/** Whether Safari still needs a first user gesture before speech can start. */
+export function isTtsUnlockPending(): boolean {
+  return hasTts() && requiresGestureUnlock() && !ttsUnlocked;
+}
+
+/**
+ * Warm up iPhone/iPad Safari's speech engine from a real user gesture so later
+ * queued playback can start outside that gesture.
+ */
+export function unlockTtsFromGesture(): boolean {
+  if (!hasTts()) return false;
+  primeVoices();
+  scheduleVoiceRefreshes();
+  if (!requiresGestureUnlock()) {
+    ttsUnlocked = true;
+    return true;
+  }
+  if (ttsUnlocked) return true;
+  try {
+    const synth = window.speechSynthesis;
+    if (synth.paused) synth.resume();
+    synth.cancel();
+    const utter = new SpeechSynthesisUtterance('.');
+    utter.volume = 0;
+    utter.rate = 1;
+    utter.lang = 'en-US';
+    synth.speak(utter);
+    ttsUnlocked = true;
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -193,11 +259,16 @@ export function speak(
   rate = TTS_RATE_DEFAULT,
 ): boolean {
   if (!hasTts()) return false;
+  if (isTtsUnlockPending()) return false;
   const cleaned = sanitizeForSpeech(text);
   if (!cleaned) return false;
   try {
     primeVoices();
+    scheduleVoiceRefreshes();
     if (!cachedJaVoice || !cachedEnVoice) refreshVoices(); // voices may have loaded since priming
+    const synth = window.speechSynthesis;
+    if (synth.paused) synth.resume();
+    if (requiresGestureUnlock() && synth.pending && !synth.speaking) synth.cancel();
     const utter = new SpeechSynthesisUtterance(cleaned.slice(0, 280));
     utter.rate = clampTtsRate(rate);
     if (isEnglishText(cleaned)) {
@@ -223,7 +294,7 @@ export function speak(
     utter.onstart = () => callbacks?.onStart?.();
     utter.onend = () => callbacks?.onEnd?.();
     utter.onerror = () => callbacks?.onError?.();
-    window.speechSynthesis.speak(utter);
+    synth.speak(utter);
     return true;
   } catch {
     // ignore speech failures

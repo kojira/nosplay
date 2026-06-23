@@ -14,10 +14,12 @@ import {
   cancelSpeech,
   clampTtsRate,
   hasTts,
+  isTtsUnlockPending,
   listVoices,
   onVoicesChanged,
   setSelectedVoiceURI,
   TTS_RATE_DEFAULT,
+  unlockTtsFromGesture,
 } from '../tts';
 import { loadPlayback, savePlayback } from './persist';
 import type { Note } from '../nostr/types';
@@ -1179,6 +1181,7 @@ export class TimelineStore {
   /** Speak the next queued note, one utterance at a time. */
   #drainTts(): void {
     if (this.#ttsBusy) return;
+    if (isTtsUnlockPending()) return;
     // Re-check mute at drain time: an author muted after a note was queued must
     // still be silenced, so skip (drop) any queued notes now from muted authors.
     let next = this.#ttsQueue.shift();
@@ -1329,6 +1332,16 @@ export class TimelineStore {
 
   setTtsRate(n: number): void {
     this.ttsRate = clampTtsRate(n);
+  }
+
+  /**
+   * Best-effort Safari/iPhone speech unlock. Safe to call from any real user
+   * interaction; non-iOS browsers effectively no-op here.
+   */
+  unlockTts(): void {
+    if (!hasTts()) return;
+    if (!unlockTtsFromGesture()) return;
+    if (this.ttsEnabled) this.#drainTts();
   }
 
   /**

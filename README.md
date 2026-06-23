@@ -144,7 +144,10 @@ This project was built to fulfill the [requirements document (要件書)](https:
   is available), while the Voice selection stays the Japanese baseline used for
   non-English text. Your voice and TTS speed choices persist across reloads; the
   voice is stored by its stable `voiceURI` and falls back to Auto if that voice
-  is no longer available. URLs and
+  is no longer available. On iPhone/iPad Safari the first real tap/key gesture
+  also warms up the speech engine so queued notes can start speaking afterward,
+  and the voice list is retried a few times because Safari may populate voices
+  late without reliably firing `voiceschanged`. URLs and
   Nostr identifiers (npub/note/etc.) are stripped or replaced before speaking so
   they aren't read aloud. The note currently being read aloud is highlighted in
   the timeline (a pulsing outline plus a 🔊 badge) so you can see which post is
