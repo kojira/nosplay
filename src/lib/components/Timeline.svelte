@@ -464,6 +464,9 @@
   let fullTextNote = $state<Note | null>(null);
   /** Note whose image(s) are shown enlarged in the lightbox, or null. */
   let lightboxNote = $state<Note | null>(null);
+  /** Full stack currently expanded in a modal, in deterministic stack order. */
+  let stackNotes = $state<Note[] | null>(null);
+  let stackResumeState: { wasLive: boolean; wasPlaying: boolean } | null = null;
 
   /**
    * Primary note action: open this specific event on njump.me in a new tab.
@@ -495,6 +498,27 @@
     menuNote = null;
   }
 
+  function openStack(p: Placed): void {
+    stackResumeState = {
+      wasLive: timeline.isLive,
+      wasPlaying: timeline.isPlaying,
+    };
+    if (timeline.isLive || timeline.isPlaying) timeline.pause();
+    menuNote = null;
+    fullTextNote = null;
+    lightboxNote = null;
+    stackNotes = p.order;
+  }
+
+  function closeStack(): void {
+    const resume = stackResumeState;
+    stackNotes = null;
+    stackResumeState = null;
+    if (!resume) return;
+    if (resume.wasLive) timeline.goLive();
+    else if (resume.wasPlaying) timeline.play();
+  }
+
   function onOverlayKey(e: KeyboardEvent, close: () => void): void {
     if (e.key === 'Escape') close();
   }
@@ -504,18 +528,27 @@
   // overlay element alone never fires. Scoped to the lightbox only — it no-ops
   // when the lightbox is closed, leaving the menu/full-text overlays untouched.
   function onWindowKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && stackNotes) {
+      closeStack();
+      return;
+    }
     if (e.key === 'Escape' && lightboxNote) lightboxNote = null;
   }
 
-  function onNoteKey(e: KeyboardEvent, note: Note): void {
+  function onNoteKey(e: KeyboardEvent, p: Placed, note: Note): void {
     // Ignore keys that bubbled up from the inner ⋯ button (which has its own
     // activation), so pressing Enter there opens the menu without also opening
     // njump.
     if (e.currentTarget !== e.target) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
-      openNote(note);
+      if (p.count > 1) openStack(p);
+      else openNote(note);
     }
+  }
+
+  function timestamp(n: Note): string {
+    return new Date(n.created_at * 1000).toLocaleString();
   }
 
   /** Open the options menu from the card's ⋯ button without triggering njump. */
@@ -646,9 +679,9 @@
           use:measure={{ id: p.note.id, on: p.count === 1 }}
           role="button"
           tabindex="0"
-          title="Open this note on njump.me (new tab) — use ⋯ for options"
-          onclick={() => openNote(front)}
-          onkeydown={(e) => onNoteKey(e, front)}
+          title={p.count > 1 ? `Show all ${p.count} stacked notes` : 'Open this note on njump.me (new tab) — use ⋯ for options'}
+          onclick={() => (p.count > 1 ? openStack(p) : openNote(front))}
+          onkeydown={(e) => onNoteKey(e, p, front)}
         >
           <!-- The card's LEFT edge is its exact time anchor; this rail sits flush to
                that left edge so variable-width cards still read right→newer. -->
@@ -769,6 +802,65 @@
           </div>
         {/if}
         <button class="menu-item" type="button" onclick={() => (fullTextNote = null)}>Close</button>
+      </div>
+    </div>
+  {/if}
+
+  <!-- expanded stack modal -->
+  {#if stackNotes}
+    <div
+      class="overlay"
+      role="presentation"
+      onclick={closeStack}
+      onkeydown={(e) => onOverlayKey(e, closeStack)}
+    >
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="modal stack-modal" role="dialog" tabindex="-1" aria-modal="true" aria-label="Stacked notes" onclick={(e) => e.stopPropagation()}>
+        <div class="modal-head">Stacked notes ×{stackNotes.length}</div>
+        <div class="stack-list">
+          {#each stackNotes as note (note.id)}
+            <article class="stack-note">
+              <div class="stack-note-meta">
+                <span class="avatar" aria-hidden="true">
+                  <span class="avatar-fallback">{initial(note)}</span>
+                  {#if meta(note)?.picture}
+                    <img
+                      class="avatar-img"
+                      src={meta(note)?.picture}
+                      alt=""
+                      loading="lazy"
+                      referrerpolicy="no-referrer"
+                      onerror={onAvatarError}
+                    />
+                  {/if}
+                </span>
+                <div class="stack-note-author">
+                  <span class="stack-note-name">{name(note)}</span>
+                  <time datetime={new Date(note.created_at * 1000).toISOString()}>{timestamp(note)}</time>
+                </div>
+              </div>
+              <div class="stack-note-body">{formatNoteContent(note.content, note.tags)}</div>
+              {#if imageUrls(note).length > 0}
+                <div class="modal-gallery" class:multi={imageUrls(note).length > 1}>
+                  {#each imageUrls(note) as src (src)}
+                    <a class="modal-image" href={src} target="_blank" rel="noreferrer noopener">
+                      <img
+                        {src}
+                        alt="Note attachment"
+                        loading="lazy"
+                        decoding="async"
+                        referrerpolicy="no-referrer"
+                        onerror={onNoteImageError}
+                      />
+                    </a>
+                  {/each}
+                </div>
+              {/if}
+            </article>
+          {/each}
+        </div>
+        <button class="menu-item" type="button" onclick={closeStack}>Close</button>
       </div>
     </div>
   {/if}
@@ -1301,6 +1393,64 @@
     overflow-wrap: anywhere;
     overflow-y: auto;
     padding: 8px 4px;
+  }
+
+  .stack-modal {
+    width: min(920px, 94%);
+  }
+
+  .stack-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-y: auto;
+    padding: 4px;
+  }
+
+  .stack-note {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .stack-note-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .stack-note-author {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .stack-note-name {
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .stack-note time {
+    color: var(--text-dim);
+    font-size: 12px;
+  }
+
+  .stack-note-body {
+    color: var(--text-h);
+    font-size: 15px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   /* Full-text modal gallery: all of a note's images. A single image is shown as

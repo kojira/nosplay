@@ -37,9 +37,12 @@ This project was built to fulfill the [requirements document (要件書)](https:
   card (offset cards peek out behind it with a **×N** count badge) so the timeline
   stays non-overlapping while **never dropping a note**. A stack's front
   **rotates every few seconds** so each folded note cycles up to the front in
-  turn (with a subtle fade-in), and whichever note is currently up is the one all
-  interactions act on — clicking opens *that* note on njump, and its
-  badges/avatar/content/image/⋯-menu/lightbox/full-text all follow it. The
+  turn (with a subtle fade-in). Clicking a stack opens an in-app modal with
+  **every note in that stack**, in deterministic stack order, including full
+  readable text, author/timestamp context, and images; opening it pauses LIVE or
+  replay, and closing it resumes only if the timeline had been advancing. The
+  currently frontmost note still drives the card's
+  badges/avatar/content/image/⋯-menu/lightbox/full-text interactions. The
   rotation order is **deterministic** (derived from the playback clock, not
   `Date.now()`/random) and it advances with playback and LIVE but **stops while
   paused** — pausing freezes the playhead, so the front holds on the note you
